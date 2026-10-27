@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交易 Agent 控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <div>
+        <div class="brand-t">交易 Agent</div>
+        <div class="brand-s">A 股短线 · 本地运行</div>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <a href="#/dashboard" data-view="dashboard"><span>仪表盘</span></a>
+      <a href="#/plans" data-view="plans"><span>交易计划</span><i class="n" id="nav-plans"></i></a>
+      <a href="#/watch" data-view="watch"><span>自选池</span><i class="n" id="nav-watch"></i></a>
+      <a href="#/holdings" data-view="holdings"><span>持仓</span><i class="n" id="nav-hold"></i></a>
+      <a href="#/alerts" data-view="alerts"><span>提醒</span><i class="n" id="nav-alerts"></i></a>
+      <a href="#/history" data-view="history"><span>简报历史</span></a>
+      <a href="#/settings" data-view="settings"><span>设置</span></a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="clock" id="clock">—</div>
+      <button class="btn primary block" id="btn-run">运行简报</button>
+      <div class="hint" id="run-hint">工作日 08:15 自动运行</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <div class="top-l">
+        <h1 id="page-title">仪表盘</h1>
+        <div class="sub" id="page-sub">正在加载…</div>
+      </div>
+      <div class="top-r">
+        <span class="chip" id="run-chip" hidden></span>
+        <button class="btn ghost" id="btn-reload">重新读取</button>
+      </div>
+    </header>
+
+    <div class="stage" id="stage"></div>
+
+    <footer class="foot">
+      <span>数据来源：东方财富（主）· 腾讯行情（备）｜本工具只做分析与计划，不含任何下单能力。</span>
+      <span class="warn">以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。</span>
+    </footer>
+  </main>
+</div>
+
+<div class="toast-wrap" id="toast"></div>
+<div class="modal-wrap" id="modal" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

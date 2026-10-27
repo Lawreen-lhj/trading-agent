@@ -1,0 +1,80 @@
+# 交易 Agent 配置 —— 由 Web 控制台管理（python server.py）
+# 手动编辑同样生效；注意界面保存时会重写本文件（旧版本备份在 data/backup/）。
+
+meta:
+  name: A股短线简报
+  timezone: Asia/Shanghai
+  style: short
+  source_primary: 东方财富 push2 接口
+  source_secondary: 腾讯行情（备源）
+risk:
+  capital: 100000
+  single_risk_pct: 1.0
+  max_hold_days: 5
+  atr_stop_mult: 1.5
+  min_rr: 1.8
+  min_score: 48
+watchlist:
+- code: '600519'
+  name: 贵州茅台
+  tag: 白酒
+- code: '300750'
+  name: 宁德时代
+  tag: 新能源
+- code: 002594
+  name: 比亚迪
+  tag: 新能源车
+- code: '688981'
+  name: 中芯国际
+  tag: 半导体
+- code: '300059'
+  name: 东方财富
+  tag: 券商
+- code: '600036'
+  name: 招商银行
+  tag: 银行
+- code: '601318'
+  name: 中国平安
+  tag: 保险
+- code: '002475'
+  name: 立讯精密
+  tag: 消费电子
+- code: '601899'
+  name: 紫金矿业
+  tag: 有色
+- code: '600900'
+  name: 长江电力
+  tag: 公用事业
+holdings: []
+thresholds:
+  pct_change_p1: 4.0
+  pct_change_p0: 7.0
+  volume_ratio_p1: 1.8
+  volume_ratio_stall: 2.2
+  bias5_hot: 10.0
+  rsi6_hot: 88.0
+  up_days_hot: 5.0
+  fade_gain: 4.0
+  drawdown_from_high_p1: 0.2
+  stop_loss_buffer: 0.03
+  rsi_overbought: 78.0
+  rsi_oversold: 25.0
+global_watch:
+  us_indices:
+  - symbol: .IXIC
+    name: 纳斯达克
+  - symbol: .INX
+    name: 标普500
+  - symbol: .DJI
+    name: 道琼斯
+  hk_indices:
+  - HSI
+  - HSTECH
+  crypto:
+  - BTC
+  - ETH
+notify:
+  macos: true
+  title: A股短线简报
+  sound: Glass
+  only_on_p0: false
