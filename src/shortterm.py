@@ -453,7 +453,10 @@ def market_temp(breadth: dict) -> dict:
         tag, tone = "赚钱效应弱", "down"
 
     warn = ""
-    if lu >= 60 and ld >= 20:
+    if breadth.get("sample_suspect"):
+        tag, tone = "数据不可用", "neutral"
+        warn = f"样本仅 {breadth.get('total_count')} 家，接口被截断，温度分不可信"
+    elif lu >= 60 and ld >= 20:
         warn = "涨停与跌停同时偏多，分歧剧烈"
     elif lu <= 15:
         warn = "涨停家数偏少，题材熄火"

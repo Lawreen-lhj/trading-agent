@@ -154,7 +154,9 @@ def market_state(breadth: dict, index_quotes: list[dict]) -> dict:
     idx = next((x for x in index_quotes if x["code"] == "000001"), None)
     sh_pct = idx.get("pct_chg") if idx else None
 
-    if not breadth or not breadth.get("total_count"):
+    # 样本被截断（只拿到几十上百家）等于没有宽度数据，直接退回纯指数口径，
+    # 否则会出现「指数 -1.3% 还判普涨」这种自相矛盾的结论。
+    if not breadth or not breadth.get("total_count") or breadth.get("sample_suspect"):
         if sh_pct is None:
             return {}
         if sh_pct >= 1.0:

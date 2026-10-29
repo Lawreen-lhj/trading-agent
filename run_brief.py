@@ -80,6 +80,11 @@ def build_brief(cfg: dict) -> dict:
         health.append("全市场涨跌家数与成交额缺失")
     elif breadth.get("stale_asof"):
         notes.append(f"涨跌家数用缓存（时点 {breadth['stale_asof']}，东财当前不可用）")
+    if breadth and breadth.get("sample_suspect"):
+        health.append(
+            f"全市场快照仅 {breadth.get('total_count')} 家（应为 5000+），"
+            "涨跌家数/涨停数/赚钱效应分不可信，今日温度只作参考"
+        )
     if not sectors:
         health.append("行业板块数据缺失")
     elif sectors.get("stale_asof"):

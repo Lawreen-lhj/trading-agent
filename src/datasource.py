@@ -163,6 +163,8 @@ def breadth() -> dict | None:
         if cached:
             d = dict(cached.get("data") or {})
             d["stale_asof"] = cached.get("asof")
+            # 缓存可能是旧版本写的、样本被截断，一样要做样本量体检
+            d["sample_suspect"] = (d.get("total_count") or 0) < 3000
             return d
         return None
 
@@ -183,6 +185,9 @@ def breadth() -> dict | None:
         "median_pct": median,
         "total_amount": sum(r["amount"] or 0 for r in rows),
         "total_count": n,
+        # 样本量体检：A 股全市场 5000+ 家，明显偏小说明接口被截断，
+        # 此时涨跌家数、中位数、赚钱效应分全部不可信，必须显式标出。
+        "sample_suspect": n < 3000,
         "top_amount": [
             {"code": r["code"], "name": r["name"], "amount": r["amount"], "pct_chg": r["pct_chg"]}
             for r in top_amount

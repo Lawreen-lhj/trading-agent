@@ -105,27 +105,56 @@ def spot(codes: list[str]) -> list[dict]:
     return out
 
 
-def market_list(page_size: int = 6000) -> list[dict]:
-    """全市场 A 股快照。"""
+def market_list(page_size: int = 100, max_pages: int = 80) -> list[dict]:
+    """全市场 A 股快照（翻页收全）。
+
+    坑：pz=6000 一次性请求时，镜像站会静默只回 100 行（= 涨幅榜首页），
+    于是「全市场」变成 100 家全红、中位数 +9.96%，赚钱效应分虚高到 90——
+    而指数其实在跌。必须按 data.total 翻页，并用返回条数反查是否收全。
+    """
     fields = "f2,f3,f4,f5,f6,f8,f9,f10,f12,f13,f14,f18,f20"
-    d = _get(
-        f"/clist/get?ut={UT}&pn=1&pz={page_size}&po=1&np=1&fltt=2&invt=2"
-        f"&fid=f3&fs={FS_ALL_A}&fields={fields}"
-    )
-    return [
-        {
-            "code": str(r.get("f12", "")).zfill(6),
-            "name": r.get("f14"),
-            "close": _num(r.get("f2")),
-            "pct_chg": _num(r.get("f3")),
-            "amount": _num(r.get("f6")),
-            "turnover": _num(r.get("f8")),
-            "pe": _num(r.get("f9")),
-            "vol_ratio": _num(r.get("f10")),
-            "market_cap": _num(r.get("f20")),
-        }
-        for r in _rows(d.get("data") or {})
-    ]
+    out: list[dict] = []
+    seen: set[str] = set()
+    total = 0
+    for pn in range(1, max_pages + 1):
+        try:
+            d = _get(
+                f"/clist/get?ut={UT}&pn={pn}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
+                f"&fid=f3&fs={FS_ALL_A}&fields={fields}"
+            )
+        except FetchError:
+            if pn == 1:
+                raise
+            break  # 中途失败：保留已收到的部分，由调用方按样本量判断可信度
+        data = d.get("data") or {}
+        if not total:
+            total = data.get("total") or 0
+        rows = _rows(data)
+        if not rows:
+            break
+        for r in rows:
+            code = str(r.get("f12", "")).zfill(6)
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append(
+                {
+                    "code": code,
+                    "name": r.get("f14"),
+                    "close": _num(r.get("f2")),
+                    "pct_chg": _num(r.get("f3")),
+                    "amount": _num(r.get("f6")),
+                    "turnover": _num(r.get("f8")),
+                    "pe": _num(r.get("f9")),
+                    "vol_ratio": _num(r.get("f10")),
+                    "market_cap": _num(r.get("f20")),
+                }
+            )
+        if total and len(out) >= total:
+            break
+    if not out:
+        raise FetchError("快照解析为空")
+    return out
 
 
 def sectors(kind: str = "industry") -> list[dict]:
