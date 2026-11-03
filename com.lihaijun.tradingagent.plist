@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  A股交易 Agent 全天托管（工作日 09:00 启动，15:10 收尾）
+  安装：cp 本文件到 ~/Library/LaunchAgents/ 后
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.lihaijun.tradingagent.plist
+  停用：launchctl bootout gui/$(id -u)/com.lihaijun.tradingagent
+  立即试跑：launchctl kickstart -k gui/$(id -u)/com.lihaijun.tradingagent
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lihaijun.tradingagent</string>
+
+  <!-- 用 caffeinate -i 包一层：托管期间阻止系统因空闲休眠（合盖仍会睡） -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/.venv/bin/python</string>
+    <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/run_day.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent</string>
+
+  <!-- 工作日 09:00 启动（Weekday: 0/7=周日, 1=周一 … 5=周五） -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <!-- 只在「非正常退出」时自动重启：崩溃/被杀会拉起，15:10 正常收尾后不会再起 -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- 两次重启至少间隔 2 分钟，防止疯狂重启打爆行情接口 -->
+  <key>ThrottleInterval</key>
+  <integer>120</integer>
+
+  <!-- 登录时不立即启动，只按日历触发 -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LANG</key>
+    <string>zh_CN.UTF-8</string>
+    <key>PYTHONIOENCODING</key>
+    <string>utf-8</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/data/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/data/logs/launchd.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交易 Agent · 能力地图与演进方案</title>
+<style>
+  :root {
+    --ink: #1A1A18;
+    --ink2: #44443F;
+    --ink3: #86867D;
+    --line: #E4E1D8;
+    --line2: #D2CEC2;
+    --bg: #FAF9F5;
+    --panel: #FFFFFF;
+    --panel2: #F4F2EC;
+    --up: #C0392B;
+    --down: #1E8449;
+    --blue: #2A5C8A;
+    --amber: #A9762A;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.65 -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 46px 30px 80px; }
+
+  /* ---------- 头部 ---------- */
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 30px; }
+  .eyebrow { font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink3); font-weight: 600; }
+  h1 { font-size: 30px; line-height: 1.28; margin: 10px 0 8px; font-weight: 700; letter-spacing: -.01em; }
+  .sub { color: var(--ink2); font-size: 14px; max-width: 760px; }
+  .meta-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; font-size: 12px; color: var(--ink3); }
+  .meta-row code { font-size: 11.5px; }
+
+  /* ---------- 通用块 ---------- */
+  h2 { font-size: 20px; margin: 52px 0 6px; font-weight: 700; letter-spacing: -.01em; }
+  h2 .n {
+    display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center;
+    background: var(--ink); color: #fff; border-radius: 50%; font-size: 12.5px;
+    margin-right: 10px; vertical-align: 2px; font-weight: 600;
+  }
+  .lead { color: var(--ink2); font-size: 14px; margin: 0 0 22px; max-width: 800px; }
+  h3 { font-size: 15px; margin: 26px 0 10px; font-weight: 600; }
+
+  .callout {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--blue);
+    border-radius: 4px; padding: 16px 20px; font-size: 14px; color: var(--ink2);
+  }
+  .callout b { color: var(--ink); }
+  .callout.warn { border-left-color: var(--amber); background: #FDFAF3; }
+  .callout.bad { border-left-color: var(--up); background: #FDF7F6; }
+
+  /* ---------- 图例 ---------- */
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; font-size: 12px; color: var(--ink3); margin: 14px 0 20px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 26px; height: 0; border-top: 2px solid var(--line2); }
+  .sw.solid { border-top: 2px solid var(--ink2); }
+  .sw.dash { border-top: 2px dashed var(--line2); }
+
+  /* ---------- 分层能力卡 ---------- */
+  .layers { display: flex; flex-direction: column; gap: 0; }
+  .layer {
+    display: grid; grid-template-columns: 132px 1fr; gap: 18px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; align-items: start;
+  }
+  .layer.dim { background: #FCFBF8; border-style: dashed; border-color: var(--line2); }
+  .layer + .layer { margin-top: 12px; }
+  .l-name { font-size: 13px; font-weight: 700; color: var(--ink); line-height: 1.45; }
+  .l-name small { display: block; font-weight: 400; color: var(--ink3); font-size: 11px; margin-top: 3px; letter-spacing: .02em; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    font-size: 12px; padding: 3px 9px; border-radius: 4px;
+    background: var(--panel2); color: var(--ink2); border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .chip.k { background: #EAF0F6; color: var(--blue); border-color: #D5E0EB; }
+  .chip.miss { background: transparent; color: var(--ink3); border: 1px dashed var(--line2); text-decoration: line-through; text-decoration-color: #C9C5B8; }
+  .chip.tag { background: #fff; color: var(--ink3); border-color: var(--line2); font-size: 11px; }
+
+  /* ---------- 表格 ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; background: var(--panel); }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink3); font-weight: 600; background: var(--panel2); }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12px; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 20px; font-weight: 600; }
+  .pill.p1 { background: #FBEAE7; color: var(--up); }
+  .pill.p2 { background: #FBF2E2; color: var(--amber); }
+  .pill.p3 { background: #EDF1F6; color: var(--blue); }
+  .pill.ok { background: #E9F3EC; color: var(--down); }
+
+  /* ---------- 图 ------ */
+  figure { margin: 22px 0 8px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 18px 14px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 12px; color: var(--ink3); text-align: center; margin-top: 12px; }
+  .svg-t { font-size: 13px; font-weight: 600; fill: #1A1A18; }
+  .svg-s { font-size: 11px; fill: #7C7C73; }
+  .svg-l { font-size: 10.5px; fill: #A9A79C; letter-spacing: .08em; }
+  .svg-n { font-size: 11px; fill: #2A5C8A; font-weight: 600; }
+
+  /* ---------- 卡片网格 ---------- */
+  .grid { display: grid; gap: 14px; }
+  .g2 { grid-template-columns: 1fr 1fr; }
+  .g3 { grid-template-columns: repeat(3, 1fr); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 15px 17px;
+  }
+  .card h4 { margin: 0 0 7px; font-size: 13.5px; font-weight: 700; }
+  .card p { margin: 0; font-size: 13px; color: var(--ink2); }
+  .card .num {
+    display: inline-block; font-size: 11px; font-weight: 700; color: #fff; background: var(--ink);
+    width: 19px; height: 19px; line-height: 19px; text-align: center; border-radius: 4px; margin-right: 7px;
+    vertical-align: 1px;
+  }
+
+  ul.clean { margin: 8px 0 0; padding-left: 0; list-style: none; }
+  ul.clean li { position: relative; padding-left: 16px; margin-bottom: 7px; font-size: 13.5px; color: var(--ink2); }
+  ul.clean li::before { content: "—"; position: absolute; left: 0; color: var(--ink3); }
+  ul.clean li b { color: var(--ink); }
+
+  code {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    background: var(--panel2); padding: 1px 5px; border-radius: 3px; color: var(--ink2); font-size: 12.5px;
+  }
+  footer { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink3); }
+  .disclaimer { margin-top: 8px; font-size: 12px; color: var(--ink3); line-height: 1.6; }
+
+  @media (max-width: 760px) {
+    .wrap { padding: 28px 16px 60px; }
+    .layer { grid-template-columns: 1fr; gap: 10px; }
+    .g2, .g3 { grid-template-columns: 1fr; }
+    h1 { font-size: 23px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Trading Agent · 现状盘点与演进方案</div>
+  <h1>A 股短线交易 Agent：现在能做什么，<br>要变成「策略实验室」还差哪三块</h1>
+  <div class="sub">
+    面向三个目标：① 多策略各自选股 ② 每套策略独立模拟盘对跑，一段时间后比出最优
+    ③ 持续复盘、自我调参。本页先摊清现有能力，再给出目标架构与差距清单。
+  </div>
+  <div class="meta-row">
+    <span>代码版本 <code>a9158e9</code></span>
+    <span>仓库 <code>Lawreen-lhj/trading-agent</code>（私有）</span>
+    <span>依赖 <code>pyyaml</code> 单一依赖</span>
+    <span>2026-10-29</span>
+  </div>
+</header>
+
+<div class="callout">
+  <b>一句话结论：</b>「单策略选股 + 出交易计划 + 简报通知」这条链路已经跑通并每天自动运行；
+  但你要的三件事——<b>多策略、模拟盘对跑、复盘调参</b>——目前<b>一项都还没有</b>。
+  缺的不是界面，是三个底层模块：全市场选股器、撮合引擎、净值与归因。这三个不做，策略对比就是假的。
+</div>
+
+<!-- ================= 1 ================= -->
+<h2><span class="n">1</span>现状能力地图</h2>
+<p class="lead">
+  实线卡片是已经跑通的，虚线卡片是缺失的。灰色划掉的项代表当前<b>有意</b>没做（比如任何真实下单通道）。
+</p>
+
+<div class="legend">
+  <span><i class="sw solid"></i>已实现并每日运行</span>
+  <span><i class="sw dash"></i>缺失 / 待建</span>
+</div>
+
+<div class="layers">
+
+  <div class="layer">
+    <div class="l-name">数据层<small>DATA</small></div>
+    <div class="chips">
+      <span class="chip k">东财 push2 主源</span>
+      <span class="chip k">腾讯行情备源（自动切换）</span>
+      <span class="chip">日线按「代码+交易日」缓存</span>
+      <span class="chip">市场级数据当日缓存 + 时点标注</span>
+      <span class="chip">全局 350ms 限速 + 重试退避</span>
+      <span class="chip">样本量体检（&lt;3000 家判截断）</span>
+      <span class="chip k">指数 / 板块 / 涨跌家数 / 涨停跌停</span>
+      <span class="chip">美股三大指数 · 恒指 · BTC/ETH</span>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="l-name">指标层<small>INDICATORS</small></div>
+    <div class="chips">
+      <span class="chip">MA5/10/20/60</span>
+      <span class="chip">EMA</span>
+      <span class="chip">RSI6 / RSI14</span>
+      <span class="chip">KDJ</span>
+      <span class="chip">BOLL</span>
+      <span class="chip">BIAS5</span>
+      <span class="chip">ATR / ATR%</span>
+      <span class="chip">量比(5日/10日)</span>
+      <span class="chip">换手率</span>
+      <span class="chip">60日区间位置</span>
+      <span class="chip">距60日高点回撤</span>
+      <span class="chip">连涨天数</span>
+      <span class="chip">支撑/阻力自动识别</span>
+      <span class="chip k">全部代码计算，模型不碰数字</span>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="l-name">评分与计划<small>DECISION</small></div>
+    <div class="chips">
+      <span class="chip k">短线评分：动量28 + 量价24 + 形态22 + 结构16 + 空间10 − 过热罚分</span>
+      <span class="chip">甜点区曲线（5日涨 3%~12% 最优，&gt;20% 降分）</span>
+      <span class="chip">交易计划：买点区间 / 止损 / 两档目标 / 盈亏比 / 股数</span>
+      <span class="chip">仓位按「单笔亏损≤1%」反推</span>
+      <span class="chip">评分 &lt;48 或 RR&lt;1.8 拒绝出计划并写明原因</span>
+      <span class="chip tag">swing 波段模型（备选，未启用）</span>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="l-name">信号层<small>SIGNALS</small></div>
+    <div class="chips">
+      <span class="chip k">P0 跌破 MA10</span>
+      <span class="chip k">P0 时间止损（持有超 5 天）</span>
+      <span class="chip">P1 放量滞涨 / 冲高回落</span>
+      <span class="chip">P1 连涨过多 / 高位回撤</span>
+      <span class="chip">P2 RSI 超买超卖</span>
+      <span class="chip">P2 缩量回踩 MA5（需 MA5&gt;MA10）</span>
+      <span class="chip">市场温度：涨停/跌停/上涨占比/中位数</span>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="l-name">输出与留痕<small>OUTPUT</small></div>
+    <div class="chips">
+      <span class="chip k">HTML 简报七章节（零 JS 零 CDN）</span>
+      <span class="chip">macOS 本地通知（P0/P1/P2 分级）</span>
+      <span class="chip">SQLite：runs / watch_rows / alerts / plans</span>
+      <span class="chip">每次计划全量落库（可回溯「当时怎么想的」）</span>
+      <span class="chip k">Web 控制台 7 页（仪表盘/计划/自选/持仓/提醒/历史/设置）</span>
+      <span class="chip">配置校验 + 自动备份 + 原子写入</span>
+      <span class="chip">工作日 08:15 自动运行</span>
+    </div>
+  </div>
+
+  <div class="layer dim">
+    <div class="l-name">缺失部分<small>GAP</small></div>
+    <div class="chips">
+      <span class="chip miss">全市场选股（现在只算自选池 10 只）</span>
+      <span class="chip miss">多策略框架（只有一套写死的 short 模型）</span>
+      <span class="chip miss">模拟撮合（无成交、无持仓记账）</span>
+      <span class="chip miss">T+1 / 涨跌停 / 整手 / 佣金印花税 / 滑点</span>
+      <span class="chip miss">净值曲线与业绩指标</span>
+      <span class="chip miss">盘后复盘与归因</span>
+      <span class="chip miss">策略版本化与参数寻优</span>
+      <span class="chip miss">盘中监控</span>
+      <span class="chip miss">真实下单通道（有意不做）</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="callout warn" style="margin-top:18px">
+  <b>关键限制：</b>当前 <code>holdings</code> 是手填的静态数据，系统并不知道你实际有没有按计划成交。
+  所以今天这个 Agent 是「<b>每天给你一份可执行计划</b>」，不是「<b>替你记账并验证策略</b>」。
+  你想要的策略对比，前提是把「计划 → 成交 → 持仓 → 盈亏」这条链自动闭合。
+</div>
+
+<!-- ================= 2 ================= -->
+<h2><span class="n">2</span>目标架构：策略实验室</h2>
+<p class="lead">
+  核心变化是把单条流水线改成<b>「策略 × 账户」的矩阵</b>：每套策略一台虚拟账户，同一套撮合引擎、同一份行情，
+  跑一个月后用同一套指标比。右边下半部分是闭环——复盘结论必须能变成新版本的策略，否则它只是日志。
+</p>
+
+<figure>
+<svg viewBox="0 0 940 452" role="img" aria-label="策略实验室架构图">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9A978B"/>
+    </marker>
+    <marker id="ar-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2A5C8A"/>
+    </marker>
+  </defs>
+
+  <!-- 上行：选股到净值 -->
+  <g>
+    <rect x="5" y="60" width="160" height="76" rx="8" fill="#FFFFFF" stroke="#C9C5B8"/>
+    <text class="svg-t" x="85" y="88" text-anchor="middle">策略库</text>
+    <text class="svg-s" x="85" y="106" text-anchor="middle">参数 + 版本号</text>
+    <text class="svg-s" x="85" y="122" text-anchor="middle">动量 / 回踩 / 超跌</text>
+
+    <rect x="197" y="60" width="160" height="76" rx="8" fill="#FFFFFF" stroke="#C9C5B8"/>
+    <text class="svg-t" x="277" y="88" text-anchor="middle">全市场选股</text>
+    <text class="svg-s" x="277" y="106" text-anchor="middle">5000+ 只筛到 Top N</text>
+    <text class="svg-s" x="277" y="122" text-anchor="middle">剔除 ST/停牌/新股</text>
+
+    <rect x="389" y="60" width="160" height="76" rx="8" fill="#FFFFFF" stroke="#C9C5B8"/>
+    <text class="svg-t" x="469" y="88" text-anchor="middle">组合与仓位</text>
+    <text class="svg-s" x="469" y="106" text-anchor="middle">单票上限 / 总仓位</text>
+    <text class="svg-s" x="469" y="122" text-anchor="middle">单笔风险 1% 反推股数</text>
+
+    <rect x="581" y="60" width="160" height="76" rx="8" fill="#FFFFFF" stroke="#C9C5B8"/>
+    <text class="svg-t" x="661" y="88" text-anchor="middle">模拟撮合</text>
+    <text class="svg-s" x="661" y="106" text-anchor="middle">T+1 · 涨跌停 · 整手</text>
+    <text class="svg-s" x="661" y="122" text-anchor="middle">佣金/印花税/滑点</text>
+
+    <rect x="773" y="60" width="160" height="76" rx="8" fill="#FFFFFF" stroke="#C9C5B8"/>
+    <text class="svg-t" x="853" y="88" text-anchor="middle">账户与净值</text>
+    <text class="svg-s" x="853" y="106" text-anchor="middle">每策略独立 10 万</text>
+    <text class="svg-s" x="853" y="122" text-anchor="middle">逐日净值曲线</text>
+  </g>
+
+  <line x1="168" y1="98" x2="190" y2="98" stroke="#9A978B" stroke-width="1.4" marker-end="url(#ar)"/>
+  <line x1="360" y1="98" x2="382" y2="98" stroke="#9A978B" stroke-width="1.4" marker-end="url(#ar)"/>
+  <line x1="552" y1="98" x2="574" y2="98" stroke="#9A978B" stroke-width="1.4" marker-end="url(#ar)"/>
+  <line x1="744" y1="98" x2="766" y2="98" stroke="#9A978B" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <!-- 下行：评价到调参 -->
+  <g>
+    <rect x="773" y="222" width="160" height="76" rx="8" fill="#F7F9FB" stroke="#2A5C8A"/>
+    <text class="svg-t" x="853" y="250" text-anchor="middle">业绩评价</text>
+    <text class="svg-s" x="853" y="268" text-anchor="middle">胜率 / 期望 / 回撤</text>
+    <text class="svg-s" x="853" y="284" text-anchor="middle">对基准沪深300</text>
+
+    <rect x="581" y="222" width="160" height="76" rx="8" fill="#F7F9FB" stroke="#2A5C8A"/>
+    <text class="svg-t" x="661" y="250" text-anchor="middle">复盘归因</text>
+    <text class="svg-s" x="661" y="268" text-anchor="middle">规则错 / 执行错 / 运气</text>
+    <text class="svg-s" x="661" y="284" text-anchor="middle">三类分开处理</text>
+
+    <rect x="389" y="222" width="160" height="76" rx="8" fill="#F7F9FB" stroke="#2A5C8A"/>
+    <text class="svg-t" x="469" y="250" text-anchor="middle">策略调参</text>
+    <text class="svg-s" x="469" y="268" text-anchor="middle">看参数平原，不看峰值</text>
+    <text class="svg-s" x="469" y="284" text-anchor="middle">生成新版本号</text>
+  </g>
+
+  <line x1="853" y1="138" x2="853" y2="214" stroke="#2A5C8A" stroke-width="1.4" marker-end="url(#ar-b)"/>
+  <line x1="770" y1="260" x2="745" y2="260" stroke="#2A5C8A" stroke-width="1.4" marker-end="url(#ar-b)"/>
+  <line x1="578" y1="260" x2="553" y2="260" stroke="#2A5C8A" stroke-width="1.4" marker-end="url(#ar-b)"/>
+
+  <!-- 回环：调参 → 策略库 -->
+  <path d="M 386 260 L 85 260 L 85 142" fill="none" stroke="#2A5C8A" stroke-width="1.4"
+        stroke-dasharray="5 4" marker-end="url(#ar-b)"/>
+  <text class="svg-n" x="250" y="252">新版本回流（A/B 并行，不覆盖旧版）</text>
+
+  <!-- 数据层 -->
+  <rect x="5" y="356" width="928" height="60" rx="8" fill="#F4F2EC" stroke="#D2CEC2"/>
+  <text class="svg-l" x="22" y="378">DATA LAYER</text>
+  <text class="svg-s" x="22" y="398" fill="#44443F">
+    东财 push2 主源（翻页收全 + 样本量校验） → 腾讯备源 ｜ 日线前复权 + 当日缓存 ｜ 交易日历 ｜ 剔除 ST/停牌/涨跌停不可买
+  </text>
+
+  <line x1="277" y1="354" x2="277" y2="142" stroke="#C9C5B8" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <line x1="661" y1="354" x2="661" y2="142" stroke="#C9C5B8" stroke-width="1.2" stroke-dasharray="4 4"/>
+
+  <text class="svg-l" x="5" y="42">① 每日一次：出计划并撮合</text>
+  <text class="svg-l" x="773" y="206">② 收盘后：评价 → 归因 → 调参</text>
+</svg>
+<figcaption>目标架构：上半是每日执行链，下半是复盘闭环，虚线回环代表策略升级必须回流成新版本而不是覆盖旧参数</figcaption>
+</figure>
+
+<h3>三个必须做对的细节（做错就白跑）</h3>
+<div class="grid g3">
+  <div class="card">
+    <h4><span class="num">1</span>用次日开盘价成交</h4>
+    <p>盘前 08:15 出计划，你最早也只能在 09:30 买。若用<b>当日收盘价</b>成交，等于偷看未来，回测收益会系统性虚高——这是最容易被自己骗过去的一条。</p>
+  </div>
+  <div class="card">
+    <h4><span class="num">2</span>一策略一账户</h4>
+    <p>每套策略独立 10 万现金、独立持仓。共用现金池会互相挤占名额，净值不可比；共用持仓则无法判断盈亏该归给谁。</p>
+  </div>
+  <div class="card">
+    <h4><span class="num">3</span>决策快照存全</h4>
+    <p>每次要记：策略版本、全部因子值、候选池 Top N、最终选中谁、<b>被拒的原因</b>。三个月后只看到「赚了」，是没法调参的。</p>
+  </div>
+</div>
+
+<!-- ================= 3 ================= -->
+<h2><span class="n">3</span>复盘闭环：怎么让「复盘」真的改变策略</h2>
+<p class="lead">
+  复盘最容易变成写日记。有效的做法是<b>强制三分法</b>——每笔交易必须归到三类之一，因为三类的处理方式完全不同。
+</p>
+
+<div class="grid g3">
+  <div class="card" style="border-left:3px solid var(--up)">
+    <h4>规则错</h4>
+    <p>按规则买在最高点、止损过窄被噪音扫掉。<br><b>动作：</b>改策略参数，生成新版本，旧版本保留对跑。</p>
+  </div>
+  <div class="card" style="border-left:3px solid var(--amber)">
+    <h4>执行错</h4>
+    <p>计划让你买 42.5，你 43.8 追进去；该止损没止。<br><b>动作：</b>不改策略，改流程（例如改成条件单/盯盘提醒）。</p>
+  </div>
+  <div class="card" style="border-left:3px solid var(--ink3)">
+    <h4>运气</h4>
+    <p>规则执行无误，但遇到大盘突发利空。<br><b>动作：</b>记录，<b>不改</b>。若连续 10 次同向，才怀疑是规则缺陷。</p>
+  </div>
+</div>
+
+<div class="callout warn" style="margin-top:16px">
+  <b>防自欺的三条硬约束：</b>
+  ① 样本外验证——调参只用前 2/3 数据，后 1/3 只做验证，不参与选择；
+  ② 跨市场状态——至少覆盖一段普涨、一段普跌、一段震荡，各 20 个交易日以上，只测一个月的「最优策略」很可能只是运气；
+  ③ 参数平原——邻近参数表现接近才算稳，孤峰式最优大概率是过拟合。
+</div>
+
+<!-- ================= 4 ================= -->
+<h2><span class="n">4</span>差距清单与建议顺序</h2>
+<p class="lead">
+  按「不做就无法验证」的顺序排，不做时间估算（这类项目的耗时主要取决于行情接口的坑，不取决于写代码）。
+</p>
+
+<table>
+  <thead>
+    <tr><th style="width:72px">优先级</th><th style="width:190px">模块</th><th>要解决什么</th><th style="width:150px">依赖</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="pill p1">P1</span></td>
+      <td><b>模拟撮合引擎</b></td>
+      <td>次日开盘成交、A股 T+1、涨跌停不可成交、100 股整手、佣金万2.5 + 印花税千1（卖出）、滑点假设。没有它，所有策略收益都是纸面数字。</td>
+      <td>日线数据（已有）</td>
+    </tr>
+    <tr>
+      <td><span class="pill p1">P1</span></td>
+      <td><b>全市场选股器</b></td>
+      <td>拉全 5000+ 只快照，按因子筛出候选池（Top 20~50），剔除 ST/停牌/上市不足 60 日/一字板。现在只算 10 只自选，谈不上策略。</td>
+      <td>东财 clist 翻页（已有）</td>
+    </tr>
+    <tr>
+      <td><span class="pill p2">P2</span></td>
+      <td><b>多策略与虚拟账户</b></td>
+      <td>把写死的 short 模型拆成可注册的策略（动量突破 / 回踩低吸 / 超跌反弹），<code>strategy_id</code> 贯穿计划、成交、持仓、净值四张表。</td>
+      <td>撮合引擎</td>
+    </tr>
+    <tr>
+      <td><span class="pill p2">P2</span></td>
+      <td><b>业绩面板</b></td>
+      <td>多策略净值叠图、胜率、盈亏比、期望值、最大回撤、换手率、平均持有天数，并与沪深300同期对比。这是「哪套最优」的唯一答案来源。</td>
+      <td>虚拟账户</td>
+    </tr>
+    <tr>
+      <td><span class="pill p3">P3</span></td>
+      <td><b>盘后复盘日报</b></td>
+      <td>15:10 核对：计划买点是否触及、成交价与计划的偏离、止损是否触发、持仓天数预警。按三分法自动打标，人工只做确认。</td>
+      <td>撮合引擎 + 快照</td>
+    </tr>
+    <tr>
+      <td><span class="pill p3">P3</span></td>
+      <td><b>版本化与灵敏度扫描</b></td>
+      <td>每组参数一个版本，同场对跑；对关键参数做单维扫描，输出「参数平原图」而不是单点最优。</td>
+      <td>业绩面板</td>
+    </tr>
+    <tr>
+      <td><span class="pill p3">P3</span></td>
+      <td><b>盘中监控</b></td>
+      <td>纯代码阈值触发（破位、放量），不进 LLM 轮询。只在触发时发通知，控制成本与噪音。</td>
+      <td>实时行情</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>起步建议：策略先别超过 3 套</h3>
+<ul class="clean">
+  <li><b>动量突破</b>——创 20 日新高 + 放量 + 板块共振。优点是信号明确，缺点是在震荡市里反复被打脸（正好用来验证「市场状态过滤」的价值）。</li>
+  <li><b>回踩低吸</b>——MA5 &gt; MA10 &gt; MA20，缩量回踩 5 日线。你现在评分体系里已经有这个因子，拆出来独立跑即可。</li>
+  <li><b>超跌反弹</b>——RSI6 &lt; 20 且距 60 日高点回撤 &gt; 30%，赌均值回归。用来当对照组：如果它在普跌市里也不赚钱，说明短线只能顺势。</li>
+</ul>
+<p class="lead" style="margin-top:14px">
+  三套就够形成对照关系（顺势 / 折返 / 逆势）。上到七八套会因为每套样本太少而无法判断显著性——30 个交易日的 5 笔交易，胜率差异全是噪音。
+</p>
+
+<footer>
+  <div>文档随代码版本更新，路径 <code>trading-agent/docs/agent-map.html</code></div>
+  <div class="disclaimer">
+    免责声明：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。
+    本系统不接入任何真实交易通道，模拟撮合结果不代表未来实盘收益。
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
