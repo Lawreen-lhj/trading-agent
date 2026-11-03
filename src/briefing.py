@@ -224,6 +224,100 @@ def render(brief: dict, cfg: dict) -> str:
             + "</div>"
         )
 
+    # ---------- 情绪周期 ----------
+    sentiment = brief.get("sentiment") or {}
+    phase = brief.get("market_phase", "")
+    if sentiment and phase:
+        phase_colors = {
+            "冰点": ("#1E8449", "#E8F6EF"), "退潮": ("#B8741A", "#FBF1E1"),
+            "中性": ("#5F5E5A", "#F1F1ED"), "回暖": ("#C0392B", "#FBEAE8"),
+            "高潮": ("#8E44AD", "#F4ECF7"),
+        }
+        pc, pbg = phase_colors.get(phase, ("#5F5E5A", "#F1F1ED"))
+        score = sentiment.get("score", 0)
+        pos_range = temp.get("position_range", (0.3, 0.7))
+        preferred = temp.get("preferred_strategies", [])
+        sig_signals = temp.get("sentiment_signals", [])
+
+        parts.append("<h2>情绪周期</h2>")
+        parts.append("<div class='cards g4'>")
+        parts.append(
+            f"<div class='card' style='border-left:3px solid {pc}'>"
+            f"<div class='k'>当前阶段</div>"
+            f"<div class='v' style='color:{pc}'>{phase}</div>"
+            f"<div class='s'>情绪分 {score:.0f}/100</div></div>"
+        )
+        parts.append(
+            f"<div class='card'><div class='k'>建议仓位</div>"
+            f"<div class='v'>{pos_range[0]*100:.0f}%–{pos_range[1]*100:.0f}%</div>"
+            f"<div class='s'>根据情绪阶段推导</div></div>"
+        )
+        parts.append(
+            f"<div class='card'><div class='k'>适配策略</div>"
+            f"<div class='v' style='font-size:14px'>{'、'.join(preferred) if preferred else '—'}</div>"
+            f"<div class='s'>情绪阶段决定策略选择</div></div>"
+        )
+        parts.append(
+            f"<div class='card'><div class='k'>连板高度</div>"
+            f"<div class='v'>{sentiment.get('board_height', 0)}</div>"
+            f"<div class='s'>情绪天花板</div></div>"
+        )
+        parts.append("</div>")
+
+        # V2 新增：精确打板情绪指标行
+        break_rate = sentiment.get("break_rate", 0)
+        promo_rate = sentiment.get("promotion_rate", 0)
+        nf = sentiment.get("north_flow") or {}
+        nf_total = nf.get("total")
+        zt_count = sentiment.get("limit_up", 0)
+        dt_count = sentiment.get("limit_down", 0)
+        br_color = "#C0392B" if break_rate > 40 else ("#B8741A" if break_rate > 25 else "#1E8449")
+        nf_color = "#C0392B" if (nf_total or 0) > 0 else "#1E8449"
+
+        parts.append("<div class='cards g4' style='margin-top:8px'>")
+        parts.append(
+            f"<div class='card'><div class='k'>炸板率</div>"
+            f"<div class='v' style='color:{br_color}'>{break_rate:.1f}%</div>"
+            f"<div class='s'>{'封板意愿弱' if break_rate > 40 else '封板尚可' if break_rate > 25 else '封板强劲'}</div></div>"
+        )
+        parts.append(
+            f"<div class='card'><div class='k'>晋级率</div>"
+            f"<div class='v'>{promo_rate*100:.0f}%</div>"
+            f"<div class='s'>昨涨停今连板比例</div></div>"
+        )
+        parts.append(
+            f"<div class='card'><div class='k'>北向资金</div>"
+            f"<div class='v' style='color:{nf_color}'>{nf_total:+.1f}亿</div>" if nf_total is not None else
+            f"<div class='card'><div class='k'>北向资金</div><div class='v'>—</div>"
+        )
+        parts.append(f"<div class='s'>{'沪股通' if nf.get('source') == 'ths' else '东财'}</div></div>")
+        parts.append(
+            f"<div class='card'><div class='k'>涨停/跌停</div>"
+            f"<div class='v'><span class='up'>{zt_count}</span> / <span class='down'>{dt_count}</span></div>"
+            f"<div class='s'>数据源 {sentiment.get('source', '—')}</div></div>"
+        )
+        parts.append("</div>")
+
+        # 连板梯队龙头
+        ladder = sentiment.get("board_ladder") or []
+        if ladder:
+            ladder_str = " · ".join(
+                f"<b>{s['name']}</b>({s['height']}板)" for s in ladder[:4]
+            )
+            parts.append(
+                f"<div class='card' style='margin-top:8px;padding:8px 14px'>"
+                f"<div class='k'>连板龙头</div>"
+                f"<div class='s' style='margin-top:2px'>{ladder_str}</div></div>"
+            )
+
+        if sig_signals:
+            parts.append(
+                "<div class='card' style='margin-top:10px;border-left:3px solid var(--p1)'>"
+                "<div class='k'>情绪信号</div><div class='s' style='line-height:1.8'>"
+                + "<br>".join(f"• {s}" for s in sig_signals)
+                + "</div></div>"
+            )
+
     # ---------- 今日交易计划（短线核心）----------
     if brief.get("style") == "short" and watch:
         ready = sorted(
@@ -294,6 +388,44 @@ def render(brief: dict, cfg: dict) -> str:
                     f"<div class='s' style='margin-top:3px'>{p['why']}</div></div>"
                 )
             parts.append("</div>")
+
+    # ---------- 多策略信号 ----------
+    strategy_signals = brief.get("strategy_signals") or []
+    if strategy_signals:
+        strategy_names = {
+            "board_hit": "打板", "trend_pullback": "趋势波段",
+            "oversold_bounce": "超跌反弹", "event_driven": "事件驱动",
+        }
+        parts.append(f"<h2>多策略信号（{len(strategy_signals)} 条）</h2>")
+        parts.append(
+            "<table><thead><tr>"
+            "<th style='width:80px'>策略</th><th>标的</th>"
+            "<th style='width:50px'>方向</th><th style='width:56px'>强度</th>"
+            "<th style='width:100px'>买点区间</th><th style='width:64px'>止损</th>"
+            "<th style='width:56px'>盈亏比</th><th>触发原因</th>"
+            "</tr></thead><tbody>"
+        )
+        for sig in sorted(strategy_signals, key=lambda s: -(s.get("strength") or 0)):
+            sname = strategy_names.get(sig.get("strategy"), sig.get("strategy", ""))
+            direction = sig.get("direction", "buy")
+            dir_cls = "up" if direction == "buy" else "down"
+            dir_txt = "买入" if direction == "buy" else "卖出"
+            strength = sig.get("strength", 0)
+            buy_lo = sig.get("buy_lo")
+            buy_hi = sig.get("buy_hi")
+            buy_txt = f"{buy_lo:.2f}–{buy_hi:.2f}" if buy_lo and buy_hi else "—"
+            parts.append(
+                f"<tr><td><span class='tag'>{sname}</span></td>"
+                f"<td><b style='font-weight:500'>{sig.get('name', '')}</b>"
+                f"<div class='code'>{sig.get('code', '')}</div></td>"
+                f"<td class='{dir_cls}'>{dir_txt}</td>"
+                f"<td><span class='score'>{strength:.0%}</span></td>"
+                f"<td class='code'>{buy_txt}</td>"
+                f"<td class='code down'>{_num(sig.get('stop'))}</td>"
+                f"<td class='code'>{_num(sig.get('rr'), 1)}</td>"
+                f"<td class='code' style='font-size:11px'>{sig.get('reason', '')}</td></tr>"
+            )
+        parts.append("</tbody></table>")
 
     # ---------- 板块 ----------
     sectors = m.get("sectors") or {}

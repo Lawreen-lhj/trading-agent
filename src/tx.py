@@ -34,7 +34,7 @@ def quotes(codes: list[str]) -> list[dict]:
         if "=" not in line or "~" not in line:
             continue
         f = line.split("~")
-        if len(f) < 33:
+        if len(f) < 35:
             continue
         out.append(
             {
@@ -42,6 +42,9 @@ def quotes(codes: list[str]) -> list[dict]:
                 "name": _s(f, 1),
                 "close": _n(f, 3),
                 "prev_close": _n(f, 4),
+                "open": _n(f, 5),
+                "high": _n(f, 33),
+                "low": _n(f, 34),
                 "change": _n(f, 31),
                 "pct_chg": _n(f, 32),
                 "volume": _n(f, 36),

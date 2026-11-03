@@ -248,6 +248,37 @@ td.name .code { font-size: 10.5px; color: var(--ink-3); letter-spacing: .3px; }
 .pill.gray { background: #F0EEE7; color: var(--ink-3); }
 .pill.hold { background: #EAF0F6; color: #2A5C8A; }
 
+/* 模拟交易：四策略账户切换标签 */
+.simtabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.simtab {
+  display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2); transition: background .15s, border-color .15s;
+}
+.simtab:hover { background: var(--panel); border-color: #D6D2C8; }
+.simtab.on { background: var(--panel); border-color: var(--ink-3); box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.simtab-cn { font-size: 13px; font-weight: 600; color: var(--ink); }
+.simtab-r { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.simtab-a { font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* 四策略横向对比 */
+.simcmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.simcmp-card { padding: 13px 14px; display: flex; flex-direction: column; gap: 6px; }
+.simcmp-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.simcmp-h b { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.simcmp-kv { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); }
+.simcmp-kv b { color: var(--ink-2); font-variant-numeric: tabular-nums; font-weight: 500; }
+.simcmp-t { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
+.simcmp-t th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 11px; padding: 4px 4px; border-bottom: 1px solid var(--line); }
+.simcmp-t th.r { text-align: right; }
+.simcmp-t td { padding: 5px 4px; border-bottom: 1px solid var(--line); }
+.simcmp-t td.r { text-align: right; }
+.simcmp-t tr:last-child td { border-bottom: none; }
+.simcmp-empty {
+  margin-top: 4px; padding: 10px 10px; font-size: 12px; color: var(--ink-3);
+  background: var(--panel-2); border: 1px dashed var(--line); border-radius: 8px; line-height: 1.5;
+}
+
 .bar { display: inline-block; width: 52px; height: 4px; border-radius: 3px; background: #EEEAE1; vertical-align: middle; overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: 3px; }
 
@@ -265,6 +296,18 @@ td.name .code { font-size: 10.5px; color: var(--ink-3); letter-spacing: .3px; }
 .note.up { border-left-color: var(--up); }
 .note.down { border-left-color: var(--down); }
 .note-row { display: flex; flex-direction: column; gap: 8px; }
+
+/* 选股页：入选理由列表 */
+.reasons { list-style: none; margin: 0 0 4px; padding: 0; }
+.reasons li {
+  position: relative; padding: 3px 0 3px 16px;
+  font-size: 12.5px; color: var(--ink-2); line-height: 1.65;
+}
+.reasons li::before {
+  content: ''; position: absolute; left: 4px; top: 11px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3);
+}
+.reasons li.muted { color: var(--ink-3); }
 
 .list { display: flex; flex-direction: column; }
 .list-i {

@@ -32,6 +32,10 @@ sys.path.insert(0, str(ROOT))
 
 from src import briefing, datasource as ds, indicators, notify, scoring, shortterm  # noqa: E402
 from src.db import Store  # noqa: E402
+from src.sentiment import calc_sentiment_score, enhance_market_temp  # noqa: E402
+from src.extras import collect_sentiment_data, save_yesterday_limit_ups  # noqa: E402
+from src.strategies import get_all_strategies, select_strategies  # noqa: E402
+from src.screener import screen_stocks  # noqa: E402
 
 
 def load_config(path: Path) -> dict:
@@ -92,6 +96,39 @@ def build_brief(cfg: dict) -> dict:
 
     state = scoring.market_state(breadth or {}, indices)
     temp = shortterm.market_temp(breadth) if breadth else {}
+
+    # ---------- 1.5 情绪周期增强 ----------
+    sentiment_data = {}
+    if cfg.get("sentiment", {}).get("enabled", True) and breadth:
+        try:
+            extras = collect_sentiment_data()
+            sentiment_extra = {
+                "max_board_height": extras.get("max_board_height", 0),
+                "yesterday_limit_up_perf": (extras.get("yesterday_limit_up_perf") or {}).get("avg_pct", 0),
+                "north_net_flow": (extras.get("north_flow") or {}).get("total", 0),
+                "sector_data": [],
+            }
+            temp = enhance_market_temp(breadth, sentiment_extra)
+            sentiment_data = {
+                "score": temp.get("sentiment_score", temp.get("score", 50)),
+                "phase": temp.get("sentiment_phase", temp.get("tag", "中性")),
+                "limit_up": temp.get("limit_up", 0),
+                "limit_down": temp.get("limit_down", 0),
+                "up_ratio": temp.get("up_ratio", 0.5),
+                "median_pct": temp.get("median_pct", 0),
+                "board_height": sentiment_extra["max_board_height"],
+                "yesterday_perf": sentiment_extra["yesterday_limit_up_perf"],
+                "total_amount": (breadth.get("total_amount") or 0) / 1e8,
+                # V2 新增：精确打板情绪指标
+                "break_rate": extras.get("break_rate", 0),
+                "promotion_rate": extras.get("promotion_rate", 0),
+                "board_ladder": extras.get("board_ladder", []),
+                "sector_limit_up": extras.get("sector_limit_up", {}),
+                "north_flow": extras.get("north_flow", {}),
+                "source": (extras.get("limit_up_stats") or {}).get("source", "unknown"),
+            }
+        except Exception as exc:
+            notes.append(f"情绪周期增强失败（{exc}），使用基础温度")
 
     # ---------- 2. 外围观测层 ----------
     us, us_src = ds.global_quotes("us")
@@ -160,6 +197,54 @@ def build_brief(cfg: dict) -> dict:
                 "alerts": rows_alerts,
             }
         )
+
+    # ---------- 3.5 多策略扫描 ----------
+    strategy_signals = []
+    market_phase = temp.get("sentiment_phase", temp.get("tag", "中性"))
+    if cfg.get("strategies", {}).get("enabled", True) and watch_rows:
+        try:
+            strategies = get_all_strategies(cfg.get("strategies", {}))
+            # 构建策略输入：股票快照列表 + 市场数据
+            stock_snaps = [
+                {**r["snap"], "code": r["code"], "name": r["name"]}
+                for r in watch_rows
+            ]
+            market_data = {
+                "phase": market_phase,
+                "sentiment_score": temp.get("sentiment_score", temp.get("score", 50)),
+                "temp": temp,
+                "sectors": sectors or {},
+            }
+            for strategy in strategies:
+                if not strategy.is_suitable(market_phase):
+                    continue
+                try:
+                    signals = strategy.scan(stock_snaps, market_data)
+                    for sig in signals:
+                        strategy_signals.append({
+                            "strategy": sig.strategy,
+                            "code": sig.code,
+                            "name": sig.name,
+                            "direction": sig.direction,
+                            "strength": sig.strength,
+                            "price": sig.price,
+                            "buy_lo": sig.buy_lo,
+                            "buy_hi": sig.buy_hi,
+                            "stop": sig.stop,
+                            "target1": sig.target1,
+                            "target2": sig.target2,
+                            "rr": sig.rr,
+                            "shares": sig.shares,
+                            "hold_days": sig.hold_days,
+                            "confidence": sig.confidence,
+                            "market_phase": sig.market_phase or market_phase,
+                            "reason": sig.reason,
+                            "extra": sig.extra,
+                        })
+                except Exception as exc:
+                    notes.append(f"{strategy.name} 策略扫描异常: {exc}")
+        except Exception as exc:
+            notes.append(f"多策略框架加载失败: {exc}")
 
     # ---------- 4. 持仓（含短线止损与时间止损）----------
     holdings = []
@@ -233,6 +318,9 @@ def build_brief(cfg: dict) -> dict:
         "data_health": health,
         "data_notes": notes,
         "risk": cfg.get("risk") or {},
+        "sentiment": sentiment_data,
+        "strategy_signals": strategy_signals,
+        "market_phase": market_phase,
     }
     brief["summary"] = build_summary(brief, cfg)
     return brief
@@ -371,8 +459,23 @@ def run_once(
     store = Store(ROOT / "data" / "market.db")
     try:
         store.save_run(brief)
+        # 情绪历史落库
+        if brief.get("sentiment"):
+            store.save_sentiment(brief["date"], brief["sentiment"])
+        # 多策略信号落库
+        if brief.get("strategy_signals"):
+            store.save_signals(brief["date"], brief["strategy_signals"])
     finally:
         store.close()
+
+    # 存档当日涨停代码（供次日"昨涨停今表现"本地对比）
+    try:
+        from src.extras import limit_up_pool
+        zt_codes = [s["code"] for s in limit_up_pool() if s.get("code")]
+        if zt_codes:
+            save_yesterday_limit_ups(zt_codes, brief["date"])
+    except Exception:
+        pass  # 不阻塞主流程
 
     n = cfg.get("notify", {}) or {}
     if notify_enabled and n.get("macos"):
@@ -393,6 +496,9 @@ def run_once(
         "alerts": len(brief["alerts_all"]),
         "p0": len([a for a in brief["alerts_all"] if a["level"] == "P0"]),
         "data_health": brief["data_health"],
+        "sentiment_phase": brief.get("market_phase"),
+        "sentiment_score": (brief.get("sentiment") or {}).get("score"),
+        "strategy_signals": len(brief.get("strategy_signals") or []),
     }
     if not quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))

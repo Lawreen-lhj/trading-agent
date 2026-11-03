@@ -15,36 +15,36 @@ risk:
   min_rr: 1.8
   min_score: 48
 watchlist:
-- code: '600519'
-  name: 贵州茅台
-  tag: 白酒
-- code: '300750'
-  name: 宁德时代
-  tag: 新能源
-- code: 002594
-  name: 比亚迪
-  tag: 新能源车
-- code: '688981'
-  name: 中芯国际
-  tag: 半导体
-- code: '300059'
-  name: 东方财富
-  tag: 券商
-- code: '600036'
-  name: 招商银行
-  tag: 银行
-- code: '601318'
-  name: 中国平安
-  tag: 保险
-- code: '002475'
-  name: 立讯精密
-  tag: 消费电子
-- code: '601899'
-  name: 紫金矿业
-  tag: 有色
-- code: '600900'
-  name: 长江电力
-  tag: 公用事业
+- code: '601366'
+  name: 利群股份
+  tag: 一般零售
+- code: 000599
+  name: 青岛双星
+  tag: 汽车零部
+- code: '002522'
+  name: 浙江众成
+  tag: 塑料
+- code: '601566'
+  name: 九牧王
+  tag: 服装家纺
+- code: '002300'
+  name: 太阳电缆
+  tag: 电网设备
+- code: 002992
+  name: 宝明科技
+  tag: 光学光电
+- code: '601188'
+  name: 龙江交通
+  tag: 铁路公路
+- code: '600327'
+  name: 大东方
+  tag: 一般零售
+- code: 000591
+  name: 太阳能
+  tag: 电力
+- code: '603258'
+  name: 电魂网络
+  tag: 游戏Ⅱ
 holdings: []
 thresholds:
   pct_change_p1: 4.0
@@ -78,3 +78,114 @@ notify:
   title: A股短线简报
   sound: Glass
   only_on_p0: false
+sentiment:
+  enabled: true
+  board_height_sample: 50
+  north_flow_threshold: 50
+screener:
+  enabled: true
+  top_n: 30
+  hard_filters:
+    exclude_st: true
+    min_list_days: 60
+    exclude_suspended: true
+    exclude_one_word: true
+    min_market_cap: 3000000000
+    min_avg_amount: 50000000
+  volume_price:
+    min_vol_ratio: 1.0
+    max_vol_ratio: 5.0
+    min_turnover_ratio: 0.8
+  price_position:
+    max_distance_to_high20: 0.2
+    min_distance_to_low20: 0.05
+    require_above_ma5: true
+strategies:
+  enabled: true
+  board_hit:
+    enabled: true
+    min_float_cap: 5000000000
+    max_float_cap: 30000000000
+    min_seal_ratio: 0.003
+    max_board_height: 3
+    suitable_phases:
+    - 回暖
+    - 高潮
+    - 中性
+  trend_pullback:
+    enabled: true
+    min_ret20: 0.08
+    max_ret20: 0.35
+    max_bias5: 0.05
+    max_vol_ratio: 0.85
+    suitable_phases:
+    - 中性
+    - 回暖
+    - 退潮
+  oversold_bounce:
+    enabled: true
+    min_drawdown: 0.15
+    max_rsi6: 25
+    min_close_pos: 0.55
+    max_bias5: -0.05
+    suitable_phases:
+    - 冰点
+    - 退潮
+  event_driven:
+    enabled: true
+    event_types:
+    - earnings_surprise
+    - policy_support
+    - equity_incentive
+    - insider_buy
+    - buyback
+    - merger_acquisition
+    - contract_win
+    suitable_phases:
+    - 冰点
+    - 退潮
+    - 中性
+    - 回暖
+    - 高潮
+simulation:
+  enabled: true
+  initial_capital: 100000
+  account_id: default
+  fees:
+    commission_rate: 0.0003
+    min_commission: 5.0
+    stamp_tax_rate: 0.0005
+    transfer_fee_rate: 1.0e-05
+    slippage: 0.002
+  risk:
+    max_single_position_pct: 0.3
+    max_total_position_pct: 0.9
+    max_daily_loss_pct: 0.05
+    max_daily_trades: 20
+    max_hold_days: 5
+    min_cash_reserve: 5000
+  auto_trade: false
+monitor:
+  enabled: true
+  interval_seconds: 15
+  auction_interval_seconds: 30
+  alert_cooldown_minutes: 30
+  thresholds:
+    stop_loss_buffer_pct: 0.01
+    time_stop_warn_days: 4
+    position_drop_pct: 0.05
+    position_gain_pct: 0.08
+    breakout_volume_ratio: 2.0
+    watchlist_jump_pct: 0.03
+    market_surge_limit_up: 30
+    market_crash_limit_down: 30
+    index_drop_pct: 0.02
+  notify:
+    macos: true
+    log_file: data/monitor_alerts.jsonl
+    webhook: ''
+review:
+  enabled: true
+  auto_review: true
+  report_format: markdown
+  save_path: data/reviews

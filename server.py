@@ -27,6 +27,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 import run_brief
 from src import configstore, notify
 from src.db import Store
+from src.simulation.account import Account
+from src.simulation.matcher import Matcher, RiskManager, market_session
+from src.review.reviewer import ReviewCalculator, format_review_report
+from src.strategies import list_strategies, select_strategies
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -35,8 +39,19 @@ CONFIG = ROOT / "config.yaml"
 BACKUP = DATA / "backup"
 BRIEFINGS = DATA / "briefings"
 DB_PATH = DATA / "market.db"
+SIM_DB = DATA / "simulation.db"
+SIM_LIVE_STATE = DATA / "sim_live_state.json"
 
 BRIEF_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|demo)\.html$")
+
+# 四策略并行模拟账户（account_id 即策略名），与 run_sim.py / run_sim_live.py 同源
+SIM_STRATEGY_IDS = ["board_hit", "trend_pullback", "oversold_bounce", "event_driven"]
+SIM_STRATEGY_CN = {
+    "board_hit": "打板/半路",
+    "trend_pullback": "趋势波段",
+    "oversold_bounce": "超跌反弹",
+    "event_driven": "事件驱动",
+}
 
 
 # ---------------------------------------------------------------- 运行管理
@@ -290,6 +305,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "data": rows})
         if path == "/api/config":
             return self._json({"ok": True, "data": configstore.load(CONFIG)})
+        if path == "/api/simulation/accounts":
+            return self._sim_accounts()
+        if path == "/api/simulation/compare":
+            return self._sim_compare()
+        if path == "/api/simulation/summary":
+            return self._sim_summary((qs.get("account") or [None])[0])
+        if path == "/api/simulation/positions":
+            return self._sim_positions((qs.get("account") or [None])[0])
+        if path == "/api/simulation/trades":
+            limit = int((qs.get("limit") or ["50"])[0])
+            return self._sim_trades(limit, (qs.get("account") or [None])[0])
+        if path == "/api/simulation/performance":
+            return self._sim_performance((qs.get("account") or [None])[0])
+        if path == "/api/simulation/snapshots":
+            limit = int((qs.get("limit") or ["60"])[0])
+            return self._sim_snapshots(limit, (qs.get("account") or [None])[0])
+        if path == "/api/review/latest":
+            return self._review_latest()
+        if path == "/api/review/history":
+            limit = int((qs.get("limit") or ["30"])[0])
+            return self._review_history(limit)
+        if path == "/api/signals":
+            day = (qs.get("date") or [None])[0]
+            strategy = (qs.get("strategy") or [None])[0]
+            return self._signals(day, strategy)
+        if path == "/api/sentiment":
+            limit = int((qs.get("limit") or ["60"])[0])
+            return self._sentiment(limit)
+        if path == "/api/monitor/alerts":
+            limit = int((qs.get("limit") or ["100"])[0])
+            level = (qs.get("level") or [None])[0]
+            return self._monitor_alerts(limit, level)
+        if path == "/api/strategies":
+            return self._json({"ok": True, "data": list_strategies()})
+        if path == "/api/screening":
+            day = (qs.get("date") or [None])[0]
+            return self._screening(day)
         return self._err("未知接口", 404)
 
     def _briefing_file(self, name: str) -> None:
@@ -335,6 +387,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._test_notify()
             if path == "/api/reveal":
                 return self._reveal(body)
+            if path == "/api/simulation/buy":
+                return self._sim_buy(body)
+            if path == "/api/simulation/sell":
+                return self._sim_sell(body)
+            if path == "/api/review/run":
+                return self._review_run(body)
         except configstore.ConfigError as exc:
             return self._err("配置校验未通过", 400, {"errors": exc.errors})
         except Exception as exc:  # noqa: BLE001
@@ -368,6 +426,290 @@ class Handler(BaseHTTPRequestHandler):
         path = mapping.get(target, DATA)
         subprocess.run(["open", str(path)], check=False)
         self._json({"ok": True, "data": {"path": str(path)}})
+
+    # ---------- 模拟交易 ----------
+    def _get_account(self, account: str = None) -> Account:
+        SIM_DB.parent.mkdir(parents=True, exist_ok=True)
+        cfg = configstore.load(CONFIG)
+        sim_cfg = cfg.get("simulation", {})
+        return Account(
+            account_id=account or sim_cfg.get("account_id", "default"),
+            initial_capital=sim_cfg.get("initial_capital", 100000),
+            db_path=SIM_DB,
+            fee_config=sim_cfg.get("fees"),
+        )
+
+    @staticmethod
+    def _quote_prices(codes: list[str]) -> dict:
+        """批量取实时价（腾讯源），返回 {code: price}；失败返回空 dict。"""
+        codes = [c for c in dict.fromkeys(codes) if c]
+        if not codes:
+            return {}
+        try:
+            from src import tx
+            out = {}
+            for q in tx.quotes([tx.tx_code(c) for c in codes]):
+                c = str(q.get("code", "")).zfill(6)
+                if q.get("close"):
+                    out[c] = q["close"]
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _refresh_accounts(self, accounts: list[Account]) -> None:
+        """给一组账户刷新持仓市值：优先实时价，退回最近快照价。
+
+        DB 只存成本/数量，不存实时市值；不刷新的话 total_assets 会只剩现金。
+        """
+        codes = [c for a in accounts for c in a.positions]
+        prices = self._quote_prices(codes)
+        for a in accounts:
+            if prices:
+                a.update_market_prices(prices)
+            # 实时价缺失的持仓，用最近一次快照里的现价兜底
+            if a.daily_snapshots:
+                last = a.daily_snapshots[-1]
+                snap = {p.get("code"): p.get("current_price")
+                        for p in last.get("positions", []) if p.get("current_price")}
+                missing = {c: snap[c] for c in a.positions if c in snap and not a.positions[c].current_price}
+                if missing:
+                    a.update_market_prices(missing)
+
+    def _sim_accounts(self) -> None:
+        """四策略账户总览 + 当前市场时段 + 盘中自动循环心跳。"""
+        cfg = configstore.load(CONFIG)
+        capital = cfg.get("simulation", {}).get("initial_capital", 100000)
+        accts = [self._get_account(aid) for aid in SIM_STRATEGY_IDS]
+        self._refresh_accounts(accts)
+        accounts = []
+        for acct in accts:
+            s = acct.get_summary()
+            accounts.append({
+                "account_id": acct.account_id,
+                "cn": SIM_STRATEGY_CN.get(acct.account_id, acct.account_id),
+                "initial_capital": s.get("initial_capital", capital),
+                "total_assets": s.get("total_assets"),
+                "cash": s.get("cash"),
+                "position_value": s.get("position_value"),
+                "position_ratio": s.get("position_ratio"),
+                "total_pnl": s.get("total_pnl"),
+                "total_return_pct": s.get("total_return_pct"),
+                "position_count": s.get("position_count"),
+                "trade_count": s.get("trade_count"),
+            })
+        live = {}
+        try:
+            live = json.loads(SIM_LIVE_STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live = {}
+        self._json({"ok": True, "data": {
+            "session": market_session(),
+            "accounts": accounts,
+            "live": {
+                "running": live.get("running", False),
+                "updated_at": live.get("updated_at"),
+                "bought_today": live.get("bought_today", False),
+                "snapshot_done": live.get("snapshot_done", False),
+            },
+        }})
+
+    def _sim_compare(self) -> None:
+        """四策略横向对比：每个账户的概览 + 完整持仓 + 空仓原因（供对比视图一次取全）。"""
+        cfg = configstore.load(CONFIG)
+        capital = cfg.get("simulation", {}).get("initial_capital", 100000)
+        accts = [self._get_account(aid) for aid in SIM_STRATEGY_IDS]
+        self._refresh_accounts(accts)
+        live = {}
+        try:
+            live = json.loads(SIM_LIVE_STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live = {}
+        notes = live.get("notes") or {}
+        accounts = []
+        for acct in accts:
+            s = acct.get_summary()
+            accounts.append({
+                "account_id": acct.account_id,
+                "cn": SIM_STRATEGY_CN.get(acct.account_id, acct.account_id),
+                "initial_capital": s.get("initial_capital", capital),
+                "total_assets": s.get("total_assets"),
+                "cash": s.get("cash"),
+                "position_value": s.get("position_value"),
+                "position_ratio": s.get("position_ratio"),
+                "total_pnl": s.get("total_pnl"),
+                "unrealized_pnl": s.get("unrealized_pnl"),
+                "total_return_pct": s.get("total_return_pct"),
+                "position_count": s.get("position_count"),
+                "trade_count": s.get("trade_count"),
+                "positions": acct.get_positions(),
+                "note": notes.get(acct.account_id, ""),
+            })
+        self._json({"ok": True, "data": {
+            "session": market_session(),
+            "accounts": accounts,
+            "live": {
+                "running": live.get("running", False),
+                "updated_at": live.get("updated_at"),
+                "bought_today": live.get("bought_today", False),
+                "snapshot_done": live.get("snapshot_done", False),
+            },
+        }})
+
+    def _sim_summary(self, account: str = None) -> None:
+        acct = self._get_account(account)
+        self._refresh_accounts([acct])
+        data = acct.get_summary()
+        data["cn"] = SIM_STRATEGY_CN.get(acct.account_id, acct.account_id)
+        data["session"] = market_session()
+        self._json({"ok": True, "data": data})
+
+    def _sim_positions(self, account: str = None) -> None:
+        acct = self._get_account(account)
+        self._refresh_accounts([acct])
+        self._json({"ok": True, "data": acct.get_positions()})
+
+    def _sim_trades(self, limit: int, account: str = None) -> None:
+        acct = self._get_account(account)
+        self._json({"ok": True, "data": acct.get_trades(limit)})
+
+    def _sim_performance(self, account: str = None) -> None:
+        acct = self._get_account(account)
+        self._json({"ok": True, "data": acct.get_performance()})
+
+    def _sim_snapshots(self, limit: int, account: str = None) -> None:
+        acct = self._get_account(account)
+        snaps = [
+            {
+                "date": s.get("date"), "total_assets": s.get("total_assets"),
+                "cash": s.get("cash"), "position_value": s.get("position_value"),
+                "position_ratio": s.get("position_ratio"), "total_pnl": s.get("total_pnl"),
+                "total_return_pct": s.get("total_return_pct"),
+                "position_count": s.get("position_count"),
+            }
+            for s in acct.daily_snapshots[-limit:]
+        ]
+        self._json({"ok": True, "data": snaps})
+
+    def _sim_buy(self, body: dict) -> None:
+        code = str(body.get("code", "")).zfill(6)
+        name = body.get("name", code)
+        price = float(body.get("price", 0))
+        quantity = int(body.get("quantity", 0))
+        strategy = body.get("strategy", "manual")
+
+        if not code or not price or not quantity:
+            return self._err("缺少必要参数: code, price, quantity")
+
+        acct = self._get_account()
+        # 风控检查
+        cfg = configstore.load(CONFIG)
+        risk_cfg = cfg.get("simulation", {}).get("risk", {})
+        rm = RiskManager(acct, risk_cfg)
+        ok, reason = rm.check_buy(code, price, quantity)
+        if not ok:
+            return self._err(f"风控拒绝: {reason}")
+
+        result = acct.buy(code, name, price, quantity, strategy=strategy)
+        if result["success"]:
+            rm.on_trade_executed()
+            acct.save()
+        self._json({"ok": result["success"], "data": result})
+
+    def _sim_sell(self, body: dict) -> None:
+        code = str(body.get("code", "")).zfill(6)
+        price = float(body.get("price", 0))
+        quantity = int(body.get("quantity", 0))
+        reason = body.get("reason", "manual")
+
+        if not code or not price or not quantity:
+            return self._err("缺少必要参数: code, price, quantity")
+
+        acct = self._get_account()
+        result = acct.sell(code, price, quantity, reason=reason)
+        if result["success"]:
+            acct.save()
+        self._json({"ok": result["success"], "data": result})
+
+    # ---------- 复盘 ----------
+    def _review_latest(self) -> None:
+        store = Store(DB_PATH)
+        try:
+            reviews = store.reviews_recent(1)
+            if not reviews:
+                return self._json({"ok": True, "data": None})
+            detail = store.review_by_date(reviews[0]["date"])
+            self._json({"ok": True, "data": detail})
+        finally:
+            store.close()
+
+    def _review_history(self, limit: int) -> None:
+        store = Store(DB_PATH)
+        try:
+            self._json({"ok": True, "data": store.reviews_recent(limit)})
+        finally:
+            store.close()
+
+    def _review_run(self, body: dict) -> None:
+        """触发复盘（异步）"""
+        import run_review
+        day = body.get("date")
+        try:
+            review = run_review.run_review(day)
+            if review:
+                self._json({"ok": True, "data": {"date": review.date, "score": review.overall_score}})
+            else:
+                self._err("复盘失败：缺少当日简报数据")
+        except Exception as exc:
+            self._err(f"复盘异常: {exc}", 500)
+
+    # ---------- 策略信号 ----------
+    def _signals(self, day: str | None, strategy: str | None) -> None:
+        store = Store(DB_PATH)
+        try:
+            if not day:
+                # 取最近有信号的日期
+                runs = store.runs(5)
+                day = runs[0]["run_date"] if runs else None
+            if not day:
+                return self._json({"ok": True, "data": []})
+            signals = store.signals_by_date(day, strategy)
+            self._json({"ok": True, "data": {"date": day, "signals": signals, "stats": store.signal_stats(strategy)}})
+        finally:
+            store.close()
+
+    # ---------- 选股结果（含理由） ----------
+    def _screening(self, day: str | None) -> None:
+        store = Store(DB_PATH)
+        try:
+            dates = store.screening_dates(30)
+            if not day:
+                day = dates[0] if dates else None
+            if not day:
+                return self._json({"ok": True, "data": {"date": None, "dates": [], "rows": []}})
+            rows = store.screening_with_detail(day)
+            self._json({"ok": True, "data": {"date": day, "dates": dates, "rows": rows}})
+        finally:
+            store.close()
+
+    # ---------- 情绪历史 ----------
+    def _sentiment(self, limit: int) -> None:
+        store = Store(DB_PATH)
+        try:
+            history = store.sentiment_history(limit)
+            latest = history[0] if history else None
+            self._json({"ok": True, "data": {"latest": latest, "history": history}})
+        finally:
+            store.close()
+
+    # ---------- 监控告警 ----------
+    def _monitor_alerts(self, limit: int, level: str | None) -> None:
+        store = Store(DB_PATH)
+        try:
+            alerts = store.monitor_alerts_recent(limit, level)
+            stats = store.monitor_alert_stats()
+            self._json({"ok": True, "data": {"alerts": alerts, "stats": stats}})
+        finally:
+            store.close()
 
 
 def main() -> int:

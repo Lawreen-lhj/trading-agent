@@ -13,13 +13,22 @@ const S = {
   alertDate: 'all',
   histSel: null,
   running: false,
+  simAccount: 'board_hit',
+  simOverview: null,
+  simDetail: null,
+  simMode: 'single',
+  simCompare: null,
+  simLoading: false,
+  simErr: null,
 };
 
 const TITLES = {
   dashboard: ['仪表盘', '今天的市场状态与可执行计划'],
+  screening: ['选股', '两段漏斗全市场选股 · 每只票附入选理由'],
   plans: ['交易计划', '买点 / 止损 / 目标 / 仓位，全部由规则算出'],
   watch: ['自选池', '短线池建议 10–20 只，太多会看不过来'],
   holdings: ['持仓', '填了持仓才算得出止损距离和时间止损'],
+  simulation: ['模拟交易', '四策略并行模拟盘 · 结合开盘收盘时间自动买卖'],
   alerts: ['提醒', '历史告警留痕，用于校验规则有没有误报'],
   history: ['简报历史', '每天一份 HTML 存档'],
   settings: ['设置', '风控参数与通知方式'],
@@ -96,8 +105,9 @@ function render() {
   $('#page-sub').textContent = sub + (b ? `　·　数据日期 ${b.date}（生成于 ${b.generated_at}）` : '　·　尚无简报');
   updateNav();
   const fn = {
-    dashboard: viewDashboard, plans: viewPlans, watch: viewWatch,
-    holdings: viewHoldings, alerts: viewAlerts, history: viewHistory, settings: viewSettings,
+    dashboard: viewDashboard, screening: viewScreening, plans: viewPlans, watch: viewWatch,
+    holdings: viewHoldings, simulation: viewSimulation, alerts: viewAlerts, history: viewHistory,
+    settings: viewSettings,
   }[S.view];
   $('#stage').innerHTML = fn();
 }
@@ -112,10 +122,21 @@ function updateNav() {
   $('#nav-watch').textContent = (d.config.watchlist || []).length;
   $('#nav-hold').textContent = (d.config.holdings || []).length || '';
 
+  const ns = $('#nav-screen');
+  const scRows = (S.screening && S.screening.rows) || [];
+  ns.textContent = scRows.length || '';
+
   const p0 = d.brief ? (d.brief.alerts_all || []).filter((a) => a.level === 'P0').length : 0;
   const na = $('#nav-alerts');
   na.textContent = p0 || '';
   na.className = 'n' + (p0 ? ' hot' : '');
+
+  const nSim = $('#nav-sim');
+  if (nSim) {
+    const held = S.simOverview ? (S.simOverview.accounts || []).filter((a) => a.position_count > 0).length : 0;
+    nSim.textContent = held || '';
+    nSim.className = 'n' + (held ? ' hot' : '');
+  }
 }
 
 /* ---------------- 视图：仪表盘 ---------------- */
@@ -513,6 +534,337 @@ function viewHistory() {
   </div>`;
 }
 
+/* ---------------- 视图：选股（含入选理由） ---------------- */
+function viewScreening() {
+  // 选股结果不在 /api/state 里（数据量大且非每页都需要），首次进入本页时懒加载。
+  if (!S.screening) {
+    if (!S.screeningLoading) {
+      S.screeningLoading = true;
+      api('/api/screening').then((d) => {
+        S.screening = d; S.screeningLoading = false; S.screeningErr = null;
+        updateNav();
+        if (S.view === 'screening') render();
+      }).catch((e) => {
+        S.screeningLoading = false; S.screeningErr = e.message;
+        if (S.view === 'screening') render();
+      });
+    }
+    return `<div class="empty">加载选股结果…</div>`;
+  }
+  if (S.screeningErr) {
+    return `<div class="empty"><b>选股结果加载失败</b>${esc(S.screeningErr)}</div>`;
+  }
+  const sc = S.screening;
+  if (!sc.date || !(sc.rows || []).length) {
+    return `<div class="empty"><b>还没有选股记录</b>
+      在项目根目录运行 <code>python3 run_screen.py --save</code> 生成一次选股并落库，
+      每只票的入选理由会显示在这里。</div>`;
+  }
+  const dates = sc.dates || [];
+  const rows = sc.rows || [];
+  return `
+  <div class="toolbar" style="margin-bottom:10px">
+    <select id="screen-date" style="width:auto;min-width:140px">
+      ${dates.map((d) => `<option value="${d}" ${d === sc.date ? 'selected' : ''}>${d}</option>`).join('')}
+    </select>
+    <span class="spacer"></span>
+    <span class="muted">共 ${rows.length} 只候选 · 理由 = 评分分项 + 触发它的具体指标</span>
+  </div>
+  ${rows.map(screenCard).join('')}`;
+}
+
+function screenCard(r) {
+  const reasons = r.reasons || [];
+  const plan = r.plan || {};
+  const pct = r.pct_chg;
+  const pctTxt = (pct == null) ? '—' : `${pct > 0 ? '+' : ''}${Number(pct).toFixed(1)}%`;
+  const pctCls = (pct == null) ? 'muted' : (pct >= 0 ? 'up' : 'down');
+  const closeTxt = (r.close == null) ? '—' : Number(r.close).toFixed(2);
+  const planTxt = plan.ready
+    ? `买 ${Number(plan.buy_lo).toFixed(2)}-${Number(plan.buy_hi).toFixed(2)}　止损 ${Number(plan.stop).toFixed(2)}　盈亏比 ${Number(plan.rr).toFixed(1)}　建议 ${plan.shares} 股`
+    : `暂无计划：${esc(plan.why || '不满足条件')}`;
+  const pats = (r.patterns || []).join('、');
+  return `
+  <div class="card" style="margin-bottom:10px">
+    <div class="card-h">
+      <div class="card-t">
+        <span class="muted">#${r.rank}</span>　${esc(r.code)}　${esc(r.name)}
+        <span class="pill" style="margin-left:6px">${esc(r.screen_label || '')}</span>
+      </div>
+      <div class="card-s">
+        评分 <b class="num">${r.score ?? '—'}</b>　现价 <b class="num">${closeTxt}</b>
+        <b class="${pctCls}">${pctTxt}</b>
+      </div>
+    </div>
+    ${pats ? `<div class="muted" style="margin:0 0 8px;font-size:12px">形态：${esc(pats)}</div>` : ''}
+    <div class="note" style="margin-bottom:8px"><b>入选理由</b></div>
+    <ul class="reasons">
+      ${reasons.length ? reasons.map((x) => `<li>${esc(x)}</li>`).join('') : '<li class="muted">（该次运行未记录理由）</li>'}
+    </ul>
+    <div class="note ${plan.ready ? 'up' : ''}" style="margin-top:8px">${planTxt}</div>
+  </div>`;
+}
+
+/* ---------------- 视图：模拟交易（四策略账户切换 + 全景） ---------------- */
+const SIM_SESSION_STYLE = {
+  morning: 'ok', afternoon: 'ok', auction: 'hold', closing_auction: 'hold',
+  pre_open: 'gray', lunch: 'gray', closed: 'gray', non_trading_day: 'gray',
+};
+
+function ensureSim(force = false) {
+  if (S.simLoading) return;
+  const cmpMode = S.simMode === 'compare';
+  const have = cmpMode ? !!S.simCompare : !!(S.simDetail && S.simDetail[S.simAccount]);
+  if (!force && S.simOverview && have) return;
+  S.simLoading = true; S.simErr = null;
+  const aid = S.simAccount || 'board_hit';
+  api('/api/simulation/accounts')
+    .then((ov) => { S.simOverview = ov; return cmpMode ? loadSimCompare() : loadSimDetail(aid); })
+    .then(() => { S.simLoading = false; updateNav(); if (S.view === 'simulation') render(); })
+    .catch((e) => { S.simLoading = false; S.simErr = e.message; if (S.view === 'simulation') render(); });
+}
+
+function loadSimDetail(aid) {
+  const q = `account=${encodeURIComponent(aid)}`;
+  return Promise.all([
+    api(`/api/simulation/summary?${q}`),
+    api(`/api/simulation/positions?${q}`),
+    api(`/api/simulation/trades?${q}&limit=50`),
+    api(`/api/simulation/snapshots?${q}`),
+  ]).then(([summary, positions, trades, snapshots]) => {
+    S.simDetail = S.simDetail || {};
+    S.simDetail[aid] = { summary, positions, trades, snapshots };
+  });
+}
+
+function loadSimCompare() {
+  return api('/api/simulation/compare').then((cmp) => { S.simCompare = cmp; });
+}
+
+function viewSimulation() {
+  const cmpMode = S.simMode === 'compare';
+  const ready = cmpMode ? !!S.simCompare
+    : !!(S.simOverview && S.simDetail && S.simDetail[S.simAccount]);
+  if (!ready) {
+    ensureSim();
+    if (S.simErr) return `<div class="empty"><b>模拟交易数据加载失败</b>${esc(S.simErr)}</div>`;
+    return `<div class="empty">加载模拟交易数据…</div>`;
+  }
+  const ov = S.simOverview || S.simCompare || {};
+  const aid = S.simAccount;
+  const d = (S.simDetail && S.simDetail[aid]) || {};
+  const s = d.summary || {};
+  const sess = ov.session || {};
+  const live = ov.live || {};
+
+  // 顶部：时段徽标 + 自动循环状态
+  const sessPill = SIM_SESSION_STYLE[sess.key] || 'gray';
+  const liveTxt = live.running
+    ? `<span class="pill ok">盘中自动循环运行中</span>`
+    : `<span class="pill gray">自动循环未运行</span>`;
+  const liveUpd = live.updated_at ? live.updated_at.replace('T', ' ').slice(0, 19) : '—';
+
+  // 账户切换标签
+  const tabs = (ov.accounts || []).map((a) => {
+    const on = a.account_id === aid;
+    const rp = a.total_return_pct || 0;
+    return `<button class="simtab${on ? ' on' : ''}" data-act="sim-account" data-v="${esc(a.account_id)}">
+      <span class="simtab-cn">${esc(a.cn)}</span>
+      <span class="simtab-r ${cls(rp)}">${pct(rp)}</span>
+      <span class="simtab-a">${num(a.total_assets, 0)}</span>
+    </button>`;
+  }).join('');
+
+  const positions = d.positions || [];
+  const trades = d.trades || [];
+  const snaps = d.snapshots || [];
+
+  const toolbar = `
+  <div class="toolbar" style="margin-bottom:12px;align-items:center">
+    <span class="pill ${sessPill}" style="font-size:13px">市场时段 · ${esc(sess.label || '—')}　${esc(sess.time || '')}</span>
+    ${liveTxt}
+    <span class="muted" style="font-size:12px">心跳 ${esc(liveUpd)}${live.bought_today ? ' · 今日已建仓' : ''}${live.snapshot_done ? ' · 已写快照' : ''}</span>
+    <span class="spacer"></span>
+    <div class="seg">
+      <button data-act="sim-mode" data-v="single" class="${cmpMode ? '' : 'on'}">单账户</button>
+      <button data-act="sim-mode" data-v="compare" class="${cmpMode ? 'on' : ''}">四策略对比</button>
+    </div>
+    <button class="btn ghost" data-act="sim-refresh">刷新</button>
+  </div>`;
+
+  if (cmpMode) return toolbar + simCompareBody(S.simCompare);
+
+  return toolbar + `
+  <div class="simtabs">${tabs}</div>
+
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
+    ${simKpi('总资产', num(s.total_assets), '')}
+    ${simKpi('可用现金', num(s.cash), '')}
+    ${simKpi('持仓市值', num(s.position_value), '')}
+    ${simKpi('仓位', ((s.position_ratio || 0) * 100).toFixed(1) + '%', '')}
+    ${simKpi('浮动盈亏', num(s.unrealized_pnl), cls(s.unrealized_pnl))}
+    ${simKpi('累计收益', pct(s.total_return_pct), cls(s.total_return_pct))}
+  </div>
+
+  <h2 class="sec">持仓明细（${esc(s.cn || aid)}）</h2>
+  ${positions.length ? `
+  <div class="card tight"><div class="tw"><table>
+    <thead><tr>
+      <th>标的</th><th class="r">数量</th><th class="r">可卖</th><th class="r">T+1冻结</th>
+      <th class="r">成本价</th><th class="r">现价</th><th class="r">市值</th>
+      <th class="r">浮动盈亏</th><th class="r">盈亏%</th><th>止损 / 目标</th>
+    </tr></thead>
+    <tbody>
+    ${positions.map((p) => {
+      const plan = p.original_plan || {};
+      return `<tr>
+        <td class="name"><b>${esc(p.name)}</b><div class="code">${esc(p.code)} · ${esc(p.strategy || '')}</div></td>
+        <td class="r n">${p.quantity}</td>
+        <td class="r n">${p.available}</td>
+        <td class="r n ${p.frozen ? 'muted' : ''}">${p.frozen || 0}</td>
+        <td class="r n">${num(p.cost_price, 3)}</td>
+        <td class="r n">${num(p.current_price)}</td>
+        <td class="r n">${num(p.market_value)}</td>
+        <td class="r n ${cls(p.profit_loss)}">${num(p.profit_loss)}</td>
+        <td class="r n ${cls(p.profit_pct)}">${pct(p.profit_pct)}</td>
+        <td class="muted" style="font-size:11.5px">损 ${plan.stop != null ? num(plan.stop) : '—'} / 盈 ${plan.target1 != null ? num(plan.target1) : '—'}</td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div></div>` : `<div class="empty">当前空仓。该策略账户在本轮情绪相位/数据条件下未建仓（详见运行说明）。</div>`}
+
+  <h2 class="sec">成交流水</h2>
+  ${trades.length ? `
+  <div class="card tight"><div class="tw"><table>
+    <thead><tr>
+      <th>时间</th><th>方向</th><th>标的</th><th class="r">数量</th><th class="r">成交价</th>
+      <th class="r">金额</th><th class="r">费用</th><th class="r">已实现盈亏</th><th>原因 / 策略</th>
+    </tr></thead>
+    <tbody>
+    ${trades.map((t) => `<tr>
+      <td class="muted" style="font-size:11.5px">${esc((t.trade_time || '').replace('T', ' ').slice(5, 16))}</td>
+      <td><span class="pill ${t.direction === 'buy' ? 'hold' : 'ok'}">${t.direction === 'buy' ? '买入' : '卖出'}</span></td>
+      <td class="name"><b>${esc(t.name)}</b><div class="code">${esc(t.code)}</div></td>
+      <td class="r n">${t.quantity}</td>
+      <td class="r n">${num(t.price)}</td>
+      <td class="r n">${num(t.direction === 'sell' ? t.net_amount : t.amount)}</td>
+      <td class="r n muted">${num(t.fees)}</td>
+      <td class="r n ${cls(t.realized_pnl)}">${t.direction === 'sell' ? num(t.realized_pnl) : '—'}</td>
+      <td class="muted" style="font-size:11.5px;max-width:240px">${esc(t.reason || t.strategy || '')}</td>
+    </tr>`).join('')}
+    </tbody>
+  </table></div></div>` : `<div class="empty">暂无成交记录。</div>`}
+
+  <h2 class="sec">每日净值</h2>
+  ${snaps.length ? `
+  <div class="card">
+    ${simSpark(snaps)}
+    <div class="tw" style="margin-top:10px"><table>
+      <thead><tr><th>日期</th><th class="r">总资产</th><th class="r">现金</th><th class="r">持仓市值</th><th class="r">仓位</th><th class="r">当日盈亏</th><th class="r">收益率</th></tr></thead>
+      <tbody>
+      ${snaps.slice().reverse().map((x) => `<tr>
+        <td class="muted">${esc(x.date)}</td>
+        <td class="r n">${num(x.total_assets)}</td>
+        <td class="r n">${num(x.cash)}</td>
+        <td class="r n">${num(x.position_value)}</td>
+        <td class="r n">${((x.position_ratio || 0) * 100).toFixed(1)}%</td>
+        <td class="r n ${cls(x.total_pnl)}">${num(x.total_pnl)}</td>
+        <td class="r n ${cls(x.total_return_pct)}">${pct(x.total_return_pct)}</td>
+      </tr>`).join('')}
+      </tbody>
+    </table></div>
+  </div>` : `<div class="empty">暂无每日快照（收盘后由 run_sim_live / run_sim 写入）。</div>`}
+  `;
+}
+
+function simCompareBody(cmp) {
+  const accts = (cmp && cmp.accounts) || [];
+  if (!accts.length) return `<div class="empty">暂无策略账户数据。</div>`;
+
+  // 横向对比表：一行一策略
+  const table = `
+  <div class="card tight"><div class="tw"><table>
+    <thead><tr>
+      <th>策略</th><th class="r">总资产</th><th class="r">可用现金</th><th class="r">持仓市值</th>
+      <th class="r">仓位</th><th class="r">浮动盈亏</th><th class="r">累计收益</th>
+      <th class="r">持仓数</th><th class="r">成交数</th>
+    </tr></thead>
+    <tbody>
+    ${accts.map((a) => `<tr>
+      <td class="name"><b>${esc(a.cn)}</b><div class="code">${esc(a.account_id)}</div></td>
+      <td class="r n">${num(a.total_assets)}</td>
+      <td class="r n">${num(a.cash)}</td>
+      <td class="r n">${num(a.position_value)}</td>
+      <td class="r n">${((a.position_ratio || 0) * 100).toFixed(1)}%</td>
+      <td class="r n ${cls(a.unrealized_pnl)}">${num(a.unrealized_pnl)}</td>
+      <td class="r n ${cls(a.total_return_pct)}">${pct(a.total_return_pct)}</td>
+      <td class="r n">${a.position_count || 0}</td>
+      <td class="r n">${a.trade_count || 0}</td>
+    </tr>`).join('')}
+    </tbody>
+  </table></div></div>`;
+
+  // 四列卡片：每策略的持仓明细（空仓则显示原因）
+  const cards = accts.map((a) => {
+    const rp = a.total_return_pct || 0;
+    const pos = a.positions || [];
+    const body = pos.length ? `
+      <table class="simcmp-t">
+        <thead><tr><th>标的</th><th class="r">数量</th><th class="r">现价</th><th class="r">盈亏%</th></tr></thead>
+        <tbody>
+        ${pos.map((p) => `<tr>
+          <td class="name"><b>${esc(p.name)}</b><div class="code">${esc(p.code)}</div></td>
+          <td class="r n">${p.quantity}</td>
+          <td class="r n">${num(p.current_price)}</td>
+          <td class="r n ${cls(p.profit_pct)}">${pct(p.profit_pct)}</td>
+        </tr>`).join('')}
+        </tbody>
+      </table>`
+      : `<div class="simcmp-empty">${esc(a.note || '空仓（本轮未建仓）')}</div>`;
+    return `
+    <div class="card simcmp-card">
+      <div class="simcmp-h">
+        <b>${esc(a.cn)}</b>
+        <span class="simtab-r ${cls(rp)}">${pct(rp)}</span>
+      </div>
+      <div class="simcmp-kv"><span>总资产</span><b>${num(a.total_assets)}</b></div>
+      <div class="simcmp-kv"><span>仓位</span><b>${((a.position_ratio || 0) * 100).toFixed(1)}%</b></div>
+      <div class="simcmp-kv"><span>浮动盈亏</span><b class="${cls(a.unrealized_pnl)}">${num(a.unrealized_pnl)}</b></div>
+      ${body}
+    </div>`;
+  }).join('');
+
+  return `
+  <h2 class="sec">四策略横向对比</h2>
+  ${table}
+  <div class="simcmp">${cards}</div>`;
+}
+
+function simKpi(label, value, colorCls) {
+  return `<div class="card" style="padding:13px 15px">
+    <div class="kpi-l">${esc(label)}</div>
+    <div class="kpi-v ${colorCls || ''}">${value}</div>
+  </div>`;
+}
+
+function simSpark(snaps) {
+  const pts = snaps.filter((x) => x.total_assets != null);
+  if (pts.length < 2) return `<div class="muted" style="font-size:12px">快照不足两天，暂无法画净值曲线。</div>`;
+  const w = 640, h = 90, pad = 6;
+  const vals = pts.map((p) => p.total_assets);
+  const min = Math.min(...vals), max = Math.max(...vals), span = (max - min) || 1;
+  const step = (w - pad * 2) / (pts.length - 1);
+  const coords = vals.map((v, i) => [pad + i * step, h - pad - ((v - min) / span) * (h - pad * 2)]);
+  const line = coords.map((c) => `${c[0].toFixed(1)},${c[1].toFixed(1)}`).join(' ');
+  const up = vals[vals.length - 1] >= vals[0];
+  const color = up ? 'var(--up)' : 'var(--down)';
+  const dots = coords.map((c, i) => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="2.5" fill="${color}"><title>${esc(pts[i].date)}：${num(pts[i].total_assets)}</title></circle>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px" preserveAspectRatio="none">
+    <polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" />
+    ${dots}
+  </svg>`;
+}
+
 /* ---------------- 视图：设置 ---------------- */
 const RISK_FIELDS = [
   ['capital', '总资金（元）', '仅用于反推建议股数，填实际可用资金', 1000, 1],
@@ -705,10 +1057,43 @@ document.addEventListener('click', async (e) => {
     if (d) window.open(`/briefings/${d}.html`, '_blank');
     return;
   }
+  if (act === 'sim-account') {
+    const aid = el.dataset.v;
+    if (aid && aid !== S.simAccount) {
+      S.simAccount = aid;
+      if (!(S.simDetail && S.simDetail[aid])) { ensureSim(); return; }
+      render();
+    }
+    return;
+  }
+  if (act === 'sim-mode') {
+    const m = el.dataset.v;
+    if (m && m !== S.simMode) {
+      S.simMode = m;
+      if (m === 'compare' && !S.simCompare) { ensureSim(); return; }
+      if (m === 'single' && !(S.simDetail && S.simDetail[S.simAccount])) { ensureSim(); return; }
+      render();
+    }
+    return;
+  }
+  if (act === 'sim-refresh') {
+    S.simOverview = null; S.simDetail = null; S.simCompare = null;
+    ensureSim(true);
+    toast('正在刷新模拟交易数据…');
+    return;
+  }
 });
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'alert-date') { S.alertDate = e.target.value; render(); }
+  if (e.target.id === 'screen-date') {
+    const day = e.target.value;
+    S.screening = null; S.screeningLoading = true; S.screeningErr = null;
+    api(`/api/screening?date=${encodeURIComponent(day)}`)
+      .then((d) => { S.screening = d; })
+      .catch((err) => { S.screeningErr = err.message; S.screening = { date: day, dates: [], rows: [] }; })
+      .finally(() => { S.screeningLoading = false; updateNav(); render(); });
+  }
 });
 
 const SCOPES = {
