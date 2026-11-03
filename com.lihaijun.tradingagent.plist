@@ -12,11 +12,19 @@
   <key>Label</key>
   <string>com.lihaijun.tradingagent</string>
 
-  <!-- 用 caffeinate -i 包一层：托管期间阻止系统因空闲休眠（合盖仍会睡） -->
+  <!--
+    caffeinate 参数含义：
+      -i 阻止「空闲休眠」——息屏（显示器休眠）本来就不影响进程，真正的杀手是整机空闲休眠
+      -m 阻止磁盘休眠
+      -s 接电时阻止整机休眠（用电池时 -s 自动失效，仍有 -i 兜底）
+    注意：合盖（clamshell）仍会让 Mac 睡眠，见 操作文档.md 4.9 节说明
+  -->
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string>
     <string>-i</string>
+    <string>-m</string>
+    <string>-s</string>
     <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/.venv/bin/python</string>
     <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/run_day.py</string>
   </array>

@@ -62,7 +62,8 @@ run_now() {
     pkill -f "run_day.py"; sleep 2
   fi
   echo "${c_green}启动全天托管（本次在前台运行，关掉窗口或 Ctrl-C 即停止）${c_off}"
-  exec "$PY" run_day.py
+  echo "${c_dim}已用 caffeinate 阻止空闲休眠：息屏不影响，合盖仍会睡${c_off}"
+  exec /usr/bin/caffeinate -i -m -s "$PY" run_day.py
 }
 
 show_status() {
