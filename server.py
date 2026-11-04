@@ -391,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/config":
                 return self._save_config(body)
+            if path == "/api/watchlist/add":
+                return self._watchlist_add(body)
             if path == "/api/run":
                 return self._start_run(body)
             if path == "/api/notify/test":
@@ -417,6 +419,52 @@ class Handler(BaseHTTPRequestHandler):
         merged = _deep_merge(current, patch)
         result = configstore.save(CONFIG, merged, BACKUP)
         self._json({"ok": True, "data": {"backup": result["backup"]}})
+
+    def _watchlist_add(self, body: dict) -> None:
+        """选股页「加入自选池」：把选中的标的合并进 config.yaml watchlist。
+
+        与 run_screen.py --write 同一套写回口径：configstore 校验 + 备份 + 原子写，
+        已存在的代码跳过（不重复加），超过 60 只上限由 configstore 报错拦下。
+        body: {"items": [{"code","name","tag"}...]} 或 {"codes": ["600519", ...]}
+        """
+        items = body.get("items")
+        if not isinstance(items, list):
+            items = [{"code": c} for c in (body.get("codes") or [])]
+        if not items:
+            return self._err("缺少 items/codes 字段")
+
+        cfg = configstore.load(CONFIG)
+        watch = list(cfg.get("watchlist") or [])
+        existing = {str(w.get("code", "")).zfill(6) for w in watch}
+
+        added, skipped = [], []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            code = str(it.get("code", "")).strip().zfill(6)
+            if not code.isdigit() or len(code) != 6:
+                skipped.append(str(it.get("code", "")))
+                continue
+            if code in existing:
+                skipped.append(code)
+                continue
+            watch.append({
+                "code": code,
+                "name": str(it.get("name") or code).strip()[:20] or code,
+                "tag": str(it.get("tag") or "选股").strip()[:12] or "选股",
+            })
+            existing.add(code)
+            added.append(code)
+
+        if not added:
+            return self._json({"ok": True, "data": {
+                "added": [], "skipped": skipped, "total": len(watch), "backup": None}})
+
+        cfg["watchlist"] = watch
+        result = configstore.save(CONFIG, cfg, BACKUP)
+        self._json({"ok": True, "data": {
+            "added": added, "skipped": skipped, "total": len(watch),
+            "backup": result["backup"]}})
 
     def _start_run(self, body: dict) -> None:
         notify_enabled = bool(body.get("notify", True))

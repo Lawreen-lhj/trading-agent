@@ -725,20 +725,41 @@ function viewScreening() {
   }
   const dates = sc.dates || [];
   const rows = sc.rows || [];
+  const inPool = watchCodes();
+  const notIn = rows.filter((r) => !inPool.has(String(r.code).padStart(6, '0')));
   return `
   <div class="toolbar" style="margin-bottom:10px">
     <select id="screen-date" style="width:auto;min-width:140px">
       ${dates.map((d) => `<option value="${d}" ${d === sc.date ? 'selected' : ''}>${d}</option>`).join('')}
     </select>
+    <button class="btn" data-act="watch-add-all" ${notIn.length ? '' : 'disabled'}>
+      + 未入池 ${notIn.length} 只全部加入自选池
+    </button>
     <span class="spacer"></span>
     <span class="muted">共 ${rows.length} 只候选 · 理由 = 评分分项 + 触发它的具体指标</span>
   </div>
-  ${rows.map(screenCard).join('')}`;
+  ${rows.map((r) => screenCard(r, inPool)).join('')}`;
 }
 
-function screenCard(r) {
+function watchCodes() {
+  const w = (S.state && S.state.config && S.state.config.watchlist) || S.cfg.watchlist || [];
+  return new Set(w.map((x) => String(x.code).padStart(6, '0')));
+}
+
+async function addWatch(items) {
+  const d = await api('/api/watchlist/add', { method: 'POST', body: JSON.stringify({ items }) });
+  const added = (d.added || []).length;
+  const skipped = (d.skipped || []).length;
+  await load();
+  toast(`已加入自选池 ${added} 只` + (skipped ? `，跳过已在池/非法 ${skipped} 只` : '') + '（config.yaml 已备份）');
+  render();
+}
+
+function screenCard(r, inPool) {
   const reasons = r.reasons || [];
   const plan = r.plan || {};
+  const code = String(r.code).padStart(6, '0');
+  const inW = (inPool || watchCodes()).has(code);
   const pct = r.pct_chg;
   const pctTxt = (pct == null) ? '—' : `${pct > 0 ? '+' : ''}${Number(pct).toFixed(1)}%`;
   const pctCls = (pct == null) ? 'muted' : (pct >= 0 ? 'up' : 'down');
@@ -771,6 +792,11 @@ function screenCard(r) {
       ${reasons.length ? reasons.map((x) => `<li>${esc(x)}</li>`).join('') : '<li class="muted">（该次运行未记录理由）</li>'}
     </ul>
     <div class="note ${plan.ready ? 'up' : ''}" style="margin-top:8px">${planTxt}</div>
+    <div style="margin-top:8px;text-align:right">
+      ${inW
+        ? '<span class="pill gray">已在自选池</span>'
+        : `<button class="btn sm" data-act="watch-add" data-code="${code}" data-name="${esc(r.name || code)}" data-tag="${esc(r.industry || '选股')}">+ 加入自选池</button>`}
+    </div>
   </div>`;
 }
 
@@ -1302,6 +1328,22 @@ document.addEventListener('click', async (e) => {
     const it = S.cfg.watchlist[i];
     if (!confirm(`从自选池移除 ${it.name || it.code}？`)) return;
     S.cfg.watchlist.splice(i, 1); render(); return;
+  }
+  if (act === 'watch-add') {
+    const it = { code: el.dataset.code, name: el.dataset.name, tag: el.dataset.tag };
+    try { await addWatch([it]); } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (act === 'watch-add-all') {
+    const rows = (S.screening && S.screening.rows) || [];
+    const inPool = watchCodes();
+    const items = rows
+      .filter((r) => !inPool.has(String(r.code).padStart(6, '0')))
+      .map((r) => ({ code: String(r.code).padStart(6, '0'), name: r.name, tag: r.industry || '选股' }));
+    if (!items.length) { toast('候选均已在自选池'); return; }
+    if (!confirm(`把 ${items.length} 只候选加入自选池？（config.yaml 会自动备份）`)) return;
+    try { await addWatch(items); } catch (err) { toast(err.message, true); }
+    return;
   }
   if (act === 'add-hold') {
     S.cfg.holdings = S.cfg.holdings || [];

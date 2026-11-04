@@ -45,6 +45,12 @@ watchlist:
 - code: '603258'
   name: 电魂网络
   tag: 游戏Ⅱ
+- code: '600118'
+  name: 中国卫星
+  tag: 选股
+- code: '300033'
+  name: 同花顺
+  tag: 选股
 holdings: []
 thresholds:
   pct_change_p1: 4.0
@@ -165,7 +171,6 @@ simulation:
     max_hold_days: 5
     min_cash_reserve: 5000
   auto_trade: false
-  # 候选池扩容：idle 策略除自选池外，再扫当日主力净流入 TopN（0=关闭，回退纯自选池）
   flow_pool_topn: 15
 monitor:
   enabled: true
