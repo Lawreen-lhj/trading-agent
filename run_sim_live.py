@@ -55,7 +55,7 @@ import run_sim  # noqa: E402
 from run_sim import (  # noqa: E402
     STRATEGY_IDS, STRATEGY_CN, KLINE_DEPENDENT, SIM_DB,
     fetch_quotes, fetch_board_pool, probe_kline, compute_sentiment,
-    fetch_events, build_stocks, _order_type_for,
+    fetch_events, build_stocks, _order_type_for, screening_universe,
 )
 
 log = logging.getLogger("sim_live")
@@ -96,10 +96,12 @@ def log_activity(kind: str, message: str, strategy: str = None, detail: dict = N
 # 候选池：自选池 ∪ 当日主力净流入 TopN（治"只扫自选池常年无候选"）
 # ═══════════════════════════════════════════════════════════════════════
 
-def build_universe(cfg: dict) -> tuple[list[dict], list[str], int]:
-    """返回 (扩展自选池, codes, 资金流新增数)。
+def build_universe(cfg: dict) -> tuple[list[dict], list[str], int, int]:
+    """返回 (扩展自选池, codes, 资金流新增数, 选股新增数)。
 
-    资金流源失败 / topn=0 时新增 0，回退为纯自选池，行为与扩池前一致。
+    候选域 = 自选池 ∪ 当日主力净流入 TopN ∪（可选）最近一次选股结果。
+    资金流源失败 / topn=0 时新增 0；选股接入由 simulation.include_screening
+    控制，默认关闭时 screen_added=0。全部关闭时回退为纯自选池，行为与扩池前一致。
     """
     base = cfg.get("watchlist", []) or []
     seen = {str(w.get("code", "")).zfill(6) for w in base}
@@ -113,8 +115,16 @@ def build_universe(cfg: dict) -> tuple[list[dict], list[str], int]:
                 extended.append({"code": c, "name": r.get("name", ""), "tag": "资金流"})
                 seen.add(c)
                 added += 1
+    # 可选：接入最近一次选股结果（simulation.include_screening，默认关闭）
+    screen_added = 0
+    for s in screening_universe(cfg):
+        c = str(s.get("code", "")).zfill(6)
+        if c and c not in seen:
+            extended.append({"code": c, "name": s.get("name", ""), "tag": s.get("tag", "选股")})
+            seen.add(c)
+            screen_added += 1
     codes = [str(w.get("code", "")).zfill(6) for w in extended]
-    return extended, codes, added
+    return extended, codes, added, screen_added
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -158,8 +168,9 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
     only_idle=True 时只为空仓/低仓位（仓位比 < IDLE_RATIO）的策略补建仓，
     供盘中补扫使用；开盘轮传 False 全量评估。
     """
-    extended, codes, pool_added = build_universe(cfg)
+    extended, codes, pool_added, screen_added = build_universe(cfg)
     n_base = len(cfg.get("watchlist", []) or [])
+    breakdown = f"自选 {n_base} + 资金流 {pool_added}" + (f" + 选股 {screen_added}" if screen_added else "")
     # 已持仓的代码也要取实时价（供后续卖出评估）
     held = {c for a in accounts.values() for c in a.positions}
     all_codes = list(dict.fromkeys(codes + list(held)))
@@ -177,13 +188,13 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
         "score": sentiment.get("score"),
         "notes": [], "buys": [], "quotes_codes": len(quotes),
         "per_note": {},
-        "pool": {"base": n_base, "added": pool_added, "stocks": len(stocks)},
+        "pool": {"base": n_base, "added": pool_added,
+                 "screen_added": screen_added, "stocks": len(stocks)},
     }
     for d in sentiment.get("_degraded", []):
         activity["notes"].append(f"数据降级：{d}")
-    activity["notes"].append(
-        f"候选池 {len(stocks)} 只（自选 {n_base} + 资金流 {pool_added}）")
-    log_activity("scan", f"扫描候选池 {len(stocks)} 只（自选 {n_base} + 资金流 {pool_added}），情绪{phase}",
+    activity["notes"].append(f"候选池 {len(stocks)} 只（{breakdown}）")
+    log_activity("scan", f"扫描候选池 {len(stocks)} 只（{breakdown}），情绪{phase}",
                  detail=activity["pool"])
 
     if not stocks:
@@ -452,7 +463,8 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     if not base_watch:
         print("自选池为空，请先用 run_screen.py --write 或手动填充 config.yaml watchlist。")
         return 1
-    extended, codes, pool_added = build_universe(cfg)
+    extended, codes, pool_added, screen_added = build_universe(cfg)
+    breakdown = f"自选 {len(base_watch)} + 资金流 {pool_added}" + (f" + 选股 {screen_added}" if screen_added else "")
 
     # 载入四个策略账户（沿用已有持仓/现金；不存在则新建）
     accounts = {
@@ -472,12 +484,12 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     print(f"盘中自动循环模拟交易启动 · {today}")
     print(f"  账户：{', '.join(STRATEGY_CN[n] + '(' + n + ')' for n in STRATEGY_IDS)}")
     print(f"  各账户本金 {capital:,.0f}，当前合计持仓 {held} 只（含昨日结转）")
-    print(f"  候选池 {len(codes)} 只（自选 {len(base_watch)} + 资金流 {pool_added}）")
+    print(f"  候选池 {len(codes)} 只（{breakdown}）")
     print(f"  轮询间隔 {interval} 秒")
     log_activity("start",
-                 f"盘中自动循环启动 · 候选池 {len(codes)} 只（自选 {len(base_watch)} + 资金流 {pool_added}）· 结转持仓 {held} 只",
+                 f"盘中自动循环启动 · 候选池 {len(codes)} 只（{breakdown}）· 结转持仓 {held} 只",
                  detail={"codes": len(codes), "base": len(base_watch),
-                         "flow_added": pool_added, "held": held})
+                         "flow_added": pool_added, "screen_added": screen_added, "held": held})
 
     kline_ok = probe_kline(codes[0])
     if not kline_ok:

@@ -68,7 +68,7 @@ python3 run_sim.py --reset          # 先清空这几个策略账户历史再重
 python3 run_sim.py --no-events      # 跳过事件源采集
 python3 run_sim.py --dry-run        # 只演算不落库
 ```
-为 board_hit/trend_pullback/oversold_bounce/event_driven 各开独立 `Account`（account_id 即策略名），流程 `scan()`→`RiskManager.check_buy`→`Matcher` 撮合（当日 OHLC，打板单封板才成交）→`take_snapshot`，结果写 `data/simulation.db`。情绪用 push2ex 涨停池 + 北向（breadth 被限流时相关因子按中性估计并标注）、行情用腾讯报价、事件用 datacenter。**日线源被限流(HTTP 501)时 trend/oversold 无法算均线/ret20/bias5/rsi6，如实空仓说明原因；相位不适配同理，绝不编造成交。** 详见 Spec 06。
+为 board_hit/trend_pullback/oversold_bounce/event_driven 各开独立 `Account`（account_id 即策略名），流程 `scan()`→`RiskManager.check_buy`→`Matcher` 撮合（当日 OHLC，打板单封板才成交）→`take_snapshot`，结果写 `data/simulation.db`。候选域为 config watchlist，`simulation.include_screening` 打开时再并最近一次选股结果（`screening_universe(cfg)`，按 code 去重打 `tag=选股`，默认关闭）。情绪用 push2ex 涨停池 + 北向（breadth 被限流时相关因子按中性估计并标注）、行情用腾讯报价、事件用 datacenter。**日线源被限流(HTTP 501)时 trend/oversold 无法算均线/ret20/bias5/rsi6，如实空仓说明原因；相位不适配同理，绝不编造成交。** 详见 Spec 06。
 
 ### run_sim_live.py —— 盘中自动循环模拟交易（结合开盘收盘时间）
 
@@ -83,7 +83,7 @@ python3 run_sim_live.py -v            # 详细日志
 定时启动（工作日 9:25 拉起）：`crontab` → `25 9 * * 1-5 cd <项目根> && python3 run_sim_live.py >> data/sim_live.log 2>&1`。
 
 与 `run_sim.py`（一次性建仓）不同，本入口是**常驻盘中循环**，用 `market_session()`（Spec 06）判断时段驱动四阶段：
-1. **开盘建仓**（每个交易日一次）：`buy_pass()` 采集情绪/涨停池/事件→`build_stocks`→各策略 `scan()`→`RiskManager.check_buy`→`Matcher.submit_order/match_orders`（打板单封板才成交），落库并更新市值。候选池走 `build_universe(cfg)` = 自选池 ∪ 当日主力净流入 TopN（`pulse.stock_flow_pool`，`simulation.flow_pool_topn` 默认 15、0 关闭；源失败回落纯自选池），治"只扫自选池常年无候选"。
+1. **开盘建仓**（每个交易日一次）：`buy_pass()` 采集情绪/涨停池/事件→`build_stocks`→各策略 `scan()`→`RiskManager.check_buy`→`Matcher.submit_order/match_orders`（打板单封板才成交），落库并更新市值。候选池走 `build_universe(cfg)` = 自选池 ∪ 当日主力净流入 TopN（`pulse.stock_flow_pool`，`simulation.flow_pool_topn` 默认 15、0 关闭；源失败回落纯自选池）∪（可选）最近一次选股结果（`simulation.include_screening`，默认 false；`run_sim.screening_universe(cfg)` 读 `screening_results` 最新一日、按 code 去重打 `tag=选股`，`screening_max_age_days` 防过期、`screening_topn` 限只数），返回 `(extended, codes, flow_added, screen_added)`，治"只扫自选池常年无候选"。
 2. **盘中补扫**（10:30 / 13:30 各一次）：`rescan_pass()` 重新探测日线源与 48h 事件源后调 `buy_pass(only_idle=True)`，仅为空仓/低仓位（仓位比<0.5）的策略补建仓；过 14:30（`RESCAN_CUTOFF`）不再补开新仓。同日重启从心跳恢复 `bought_today`/`snapshot_done`，补扫 `done_slots` 不跨重启保留。
 3. **盘中卖出**（每次轮询）：`sell_pass()` 仅对 `available>0`（T+1 可卖）的持仓，按 `evaluate_exit()` 判定——跌停封死不卖、破止损、封板后跌破成本、达目标①、尾盘时间止损；用 `account.sell(current_price)` 直接成交（不走 Matcher，因其 MARKET 卖单按开盘价成交属盘后口径）。
 4. **尾盘结算**（`closing_auction` 或 ≥14:50 一次）：`take_snapshot` 落每日净值；随后 `_refresh_brief_after_close()` 在 ≥15:00 时**自动静默重跑 `run_brief.run_once(notify_enabled=False)`**，让 Web 仪表盘日期/温度/次日计划每日滚动（否则停留在前一交易日快照）。

@@ -57,6 +57,7 @@ log = logging.getLogger("sim")
 
 CONFIG_PATH = ROOT / "config.yaml"
 SIM_DB = ROOT / "data" / "simulation.db"
+MARKET_DB = ROOT / "data" / "market.db"
 
 # K线日线当日缓存：扩池后候选变多，同一进程同一天内同一 code 只抓一次日线，
 # 避免开盘轮+两次补扫重复请求把腾讯/东财日线源打到限流（HTTP 501）。
@@ -191,6 +192,78 @@ def compute_sentiment() -> dict:
     }
     sent["_degraded"] = degraded
     return sent
+
+
+def screening_universe(cfg: dict) -> list[dict]:
+    """可选：把最近一次选股结果接入模拟盘候选域。
+
+    由 `simulation.include_screening` 开关控制，默认关闭 → 返回空列表，
+    候选域与接入前完全一致（自选池 / 自选池∪资金流）。
+
+    开关取值：
+      false / 0 / 缺省 : 不接入
+      true / "passed"  : 只接通过三层漏斗(layer3_pass) 或策略直命(via_strategy) 的票
+      "all"            : 接当日选股落库的全部候选
+
+    另两个可选参数：
+      simulation.screening_max_age_days (默认 3)：选股结果超过这个天数就不接，
+        避免用过期候选建仓；0 或负数表示不限天数。
+      simulation.screening_topn (默认 0=不限)：最多接前 N 只（按 rank）。
+
+    任何读取/日期异常都只记 warning 并返回 []，绝不影响交易主循环。
+    """
+    sim_cfg = cfg.get("simulation", {}) or {}
+    flag = sim_cfg.get("include_screening", False)
+    if not flag:
+        return []
+    passed_only = str(flag).lower() not in ("all",)
+    try:
+        max_age = int(sim_cfg.get("screening_max_age_days", 3) or 0)
+    except (TypeError, ValueError):
+        max_age = 3
+    try:
+        topn = int(sim_cfg.get("screening_topn", 0) or 0)
+    except (TypeError, ValueError):
+        topn = 0
+
+    try:
+        from src.db import Store
+        store = Store(MARKET_DB)
+        try:
+            dates = store.screening_dates(limit=1)
+            if not dates:
+                log.info("include_screening 开启但无选股记录，跳过")
+                return []
+            run_date = dates[0]
+            if max_age > 0:
+                try:
+                    age = (date.today() - date.fromisoformat(run_date)).days
+                except ValueError:
+                    age = 9999
+                if age > max_age:
+                    log.info("选股结果 %s 已超 %d 天（max_age_days），跳过接入", run_date, max_age)
+                    return []
+            rows = store.screening_with_detail(run_date)
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("读取选股结果失败，跳过 include_screening: %s", exc)
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        via = bool(r.get("via_strategy"))
+        passed = bool(r.get("layer3_pass")) or via
+        if passed_only and not passed:
+            continue
+        code = str(r.get("code", "")).strip().zfill(6)
+        if not code.isdigit() or len(code) != 6:
+            continue
+        out.append({"code": code, "name": str(r.get("name") or code)[:20], "tag": "选股"})
+        if topn and len(out) >= topn:
+            break
+    log.info("include_screening：接入 %s 选股候选 %d 只", run_date, len(out))
+    return out
 
 
 def fetch_events(codes: list[str]) -> list[Event]:
@@ -597,10 +670,20 @@ def main():
     cfg = configstore.load(CONFIG_PATH)
     capital = args.capital or cfg.get("simulation", {}).get("initial_capital", 100000)
 
-    watchlist = cfg.get("watchlist", []) or []
+    watchlist = list(cfg.get("watchlist", []) or [])
     if not watchlist:
         print("自选池为空，请先用 run_screen.py --write 或手动填充 config.yaml watchlist。")
         return 1
+    # 可选：接入最近一次选股结果（simulation.include_screening，默认关闭）
+    seen_codes = {str(w.get("code", "")).zfill(6) for w in watchlist}
+    screen_added = 0
+    for s in screening_universe(cfg):
+        if s["code"] not in seen_codes:
+            watchlist.append(s)
+            seen_codes.add(s["code"])
+            screen_added += 1
+    if screen_added:
+        print(f"接入选股候选 {screen_added} 只（include_screening）")
     codes = [str(w.get("code", "")).zfill(6) for w in watchlist]
 
     if args.reset and not args.dry_run:

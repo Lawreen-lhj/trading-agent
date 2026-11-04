@@ -102,11 +102,17 @@ def build_brief(cfg: dict) -> dict:
     if cfg.get("sentiment", {}).get("enabled", True) and breadth:
         try:
             extras = collect_sentiment_data()
+            lus = extras.get("limit_up_stats") or {}
+            from_pool = lus.get("source") == "push2ex"
             sentiment_extra = {
                 "max_board_height": extras.get("max_board_height", 0),
                 "yesterday_limit_up_perf": (extras.get("yesterday_limit_up_perf") or {}).get("avg_pct", 0),
                 "north_net_flow": (extras.get("north_flow") or {}).get("total", 0),
                 "sector_data": [],
+                # 涨停口径修复：封板池精确家数覆盖 breadth 的 ≥9.8% 粗估，
+                # 仅 push2ex 到手时才传，否则 None → enhance_market_temp 回退 breadth
+                "limit_up": lus.get("limit_up_count") if from_pool else None,
+                "limit_down": lus.get("limit_down_count") if from_pool else None,
             }
             temp = enhance_market_temp(breadth, sentiment_extra)
             sentiment_data = {
@@ -114,6 +120,9 @@ def build_brief(cfg: dict) -> dict:
                 "phase": temp.get("sentiment_phase", temp.get("tag", "中性")),
                 "limit_up": temp.get("limit_up", 0),
                 "limit_down": temp.get("limit_down", 0),
+                "limit_up_raw": temp.get("limit_up_raw", temp.get("limit_up", 0)),
+                "limit_up_source": temp.get("limit_up_source", "breadth_snapshot"),
+                "limit_up_note": temp.get("limit_up_note", ""),
                 "up_ratio": temp.get("up_ratio", 0.5),
                 "median_pct": temp.get("median_pct", 0),
                 "board_height": sentiment_extra["max_board_height"],

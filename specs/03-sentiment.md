@@ -59,15 +59,16 @@
 ## 五、集成入口 `enhance_market_temp(breadth, extra)`
 
 把基础市场温度（`shortterm.market_temp`）与情绪周期融合：
-- 输入 `breadth`（涨跌家数）+ `extra`（max_board_height / yesterday_limit_up_perf / north_net_flow / sector_data）。
+- 输入 `breadth`（涨跌家数）+ `extra`（max_board_height / yesterday_limit_up_perf / north_net_flow / sector_data，及可选 `limit_up`/`limit_down`）。
+- **涨停口径修复**：`breadth.limit_up` 是「涨幅 ≥9.8%」的快照粗估，20cm 大涨日会把大涨未封板的票也算成涨停（曾 365 vs 真实封板 118 虚高），使温度分/情绪分偏高、并与脉搏页（push2ex 封板池）打架。当 `extra.limit_up`（封板池精确家数，仅 `limit_up_stats.source=="push2ex"` 时由 run_brief 传入）存在，函数在调 `shortterm.market_temp` **之前**用它（及 `extra.limit_down`）覆盖 breadth 的涨停/跌停数，令基础温度与情绪分都吃封板池口径；不传则回退 breadth。
 - 内部调 `calc_sentiment_score` + `calc_sector_sentiment`。
-- 输出在基础温度上追加：`sentiment_score / sentiment_phase / position_range / preferred_strategies / sentiment_factors / sentiment_signals / sector_sentiment`。
+- 输出在基础温度上追加：`sentiment_score / sentiment_phase / position_range / preferred_strategies / sentiment_factors / sentiment_signals / sector_sentiment`，以及口径追溯字段 `limit_up_raw`（原 ≥9.8% 粗估）/ `limit_up_source`（push2ex_pool｜breadth_snapshot）/ `limit_up_note`。
 
 ## 触发方式与数据流
 
 `run_brief.py` 的「1.5 情绪周期增强」段：
 1. `extras.collect_sentiment_data()` 采集精确数据。
-2. 组装 `sentiment_extra`（连板高度/昨涨停表现/北向）。
+2. 组装 `sentiment_extra`（连板高度/昨涨停表现/北向；并在 `limit_up_stats.source=="push2ex"` 时带上封板池 `limit_up_count`/`limit_down_count` 作口径覆盖）。
 3. `enhance_market_temp(breadth, sentiment_extra)` 得增强温度 `temp`。
 4. `temp.sentiment_phase` 作为 `market_phase` 驱动后续策略启停（见 Spec 05）。
 5. 情绪数据落 `sentiment_history` 表，供复盘核对判断准确性（见 Spec 08）。

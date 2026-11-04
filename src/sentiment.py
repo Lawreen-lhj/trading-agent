@@ -370,17 +370,43 @@ def enhance_market_temp(breadth: dict, extra: dict | None = None) -> dict:
         "yesterday_limit_up_perf": float,
         "north_net_flow": float,
         "sector_data": list,
+        # 涨停口径修复（可选）：push2ex 封板池的精确家数。
+        # 仅当数据源确为封板池（source=push2ex）时由调用方传入；
+        # 传入后覆盖 breadth 的 ≥9.8% 快照粗估，不传则回退 breadth。
+        "limit_up": int | None,
+        "limit_down": int | None,
     }
 
     返回增强后的温度数据，兼容现有 shortterm.market_temp() 的输出格式。
     """
     from src.shortterm import market_temp as _base_temp
 
-    base = _base_temp(breadth)
+    extra = extra or {}
+
+    # ── 涨停口径修复 ──────────────────────────────────────────────
+    # breadth.limit_up 用「涨幅 ≥9.8%」粗估涨停，20cm 大涨日会把大涨但未封板的
+    # 票也算进去（如 365 vs 真实封板 118），温度分/情绪分随之虚高，还会和脉搏页
+    # （push2ex 封板池）数字打架。封板池可用时以其为准，不可用则回退 breadth。
+    raw_lu = breadth.get("limit_up", 0) if breadth else 0
+    raw_ld = breadth.get("limit_down", 0) if breadth else 0
+    pool_lu = extra.get("limit_up")
+    pool_ld = extra.get("limit_down")
+    temp_breadth = breadth
+    lu_source = "breadth_snapshot"
+    lu_note = ""
+    if isinstance(pool_lu, (int, float)) and pool_lu >= 0:
+        temp_breadth = dict(breadth or {})
+        temp_breadth["limit_up"] = int(pool_lu)
+        if isinstance(pool_ld, (int, float)) and pool_ld >= 0:
+            temp_breadth["limit_down"] = int(pool_ld)
+        lu_source = "push2ex_pool"
+        if int(pool_lu) != raw_lu:
+            lu_note = (f"涨停口径以封板池为准（{int(pool_lu)} 家），"
+                       f"快照粗估 {raw_lu} 家（≥9.8%）已弃用")
+
+    base = _base_temp(temp_breadth)
     if not base:
         return {}
-
-    extra = extra or {}
 
     # 计算增强情绪分
     sentiment = calc_sentiment_score(
@@ -407,6 +433,11 @@ def enhance_market_temp(breadth: dict, extra: dict | None = None) -> dict:
         "sentiment_factors": sentiment["factors"],
         "sentiment_signals": sentiment["signals"],
         "sector_sentiment": sector_sentiment,
+        # 涨停口径透明化：limit_up 已是最终采用值，raw/source/note 供追溯
+        "limit_up_raw": raw_lu,
+        "limit_down_raw": raw_ld,
+        "limit_up_source": lu_source,
+        "limit_up_note": lu_note,
     })
 
     return enhanced

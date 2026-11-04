@@ -64,4 +64,4 @@
 
 ## 配置项（config.yaml → simulation）
 
-initial_capital/account_id、fees（5项费率）、risk（6项风控）、flow_pool_topn（盘中循环候选池扩容数：自选池 ∪ 当日主力净流入 TopN，默认 15、0 关闭）、auto_trade。
+initial_capital/account_id、fees（5项费率）、risk（6项风控）、flow_pool_topn（盘中循环候选池扩容数：自选池 ∪ 当日主力净流入 TopN，默认 15、0 关闭）、include_screening（是否把最近一次选股结果并入候选域，默认 false；true/passed 只接过漏斗或策略直命、all 接全部）、screening_max_age_days（选股结果超此天数不接，默认 3、0=不限）、screening_topn（最多接前 N 只，默认 0=不限）、auto_trade。
