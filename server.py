@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import run_brief
-from src import configstore, notify
+from src import configstore, notify, pulse
 from src.db import Store
 from src.simulation.account import Account
 from src.simulation.matcher import Matcher, RiskManager, market_session
@@ -305,10 +305,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "data": rows})
         if path == "/api/config":
             return self._json({"ok": True, "data": configstore.load(CONFIG)})
+        if path == "/api/pulse":
+            return self._pulse()
+        if path == "/api/activity":
+            limit = int((qs.get("limit") or ["60"])[0])
+            day = (qs.get("date") or [None])[0]
+            return self._activity(limit, day)
         if path == "/api/simulation/accounts":
             return self._sim_accounts()
         if path == "/api/simulation/compare":
             return self._sim_compare()
+        if path == "/api/simulation/kline":
+            code = (qs.get("code") or [None])[0]
+            days = int((qs.get("days") or ["160"])[0])
+            return self._sim_kline(code, days)
         if path == "/api/simulation/summary":
             return self._sim_summary((qs.get("account") or [None])[0])
         if path == "/api/simulation/positions":
@@ -513,6 +523,26 @@ class Handler(BaseHTTPRequestHandler):
             },
         }})
 
+    def _pulse(self) -> None:
+        """当日资金脉搏：板块主力榜/个股主力双榜/北向/涨停炸板计数 + 日内趋势。"""
+        store = Store(DB_PATH)
+        try:
+            data = pulse.collect(store=store)
+            today = datetime.now().strftime("%Y-%m-%d")
+            data = {**data, "trend": store.pulse_snapshots_today(today, limit=120)}
+        finally:
+            store.close()
+        return self._json({"ok": True, "data": data})
+
+    def _activity(self, limit: int = 60, day: str = None) -> None:
+        """系统活动流：run_sim_live 每轮落盘的 scan/skip/buy/sell/snapshot 等。"""
+        store = Store(DB_PATH)
+        try:
+            rows = store.activity_recent(day, limit)
+        finally:
+            store.close()
+        return self._json({"ok": True, "data": rows})
+
     def _sim_compare(self) -> None:
         """四策略横向对比：每个账户的概览 + 完整持仓 + 空仓原因（供对比视图一次取全）。"""
         cfg = configstore.load(CONFIG)
@@ -553,6 +583,49 @@ class Handler(BaseHTTPRequestHandler):
                 "bought_today": live.get("bought_today", False),
                 "snapshot_done": live.get("snapshot_done", False),
             },
+        }})
+
+    def _sim_kline(self, code: str, days: int = 160) -> None:
+        """某标的日K + 四策略账户在该标的上的全部买卖点（供 K 线图画点）。"""
+        if not code:
+            return self._json({"ok": False, "error": "缺少 code 参数"})
+        code = str(code).zfill(6)
+        candles, src_err = [], ""
+        try:
+            from src import tx
+            raw = tx.kline(code, days=min(max(days, 60), 320))
+            candles = [
+                {"date": r.get("date"), "open": r.get("open"), "close": r.get("close"),
+                 "high": r.get("high"), "low": r.get("low")}
+                for r in raw
+            ]
+        except Exception as exc:  # noqa: BLE001
+            src_err = f"日线源不可用：{type(exc).__name__} {str(exc)[:60]}"
+        marks, name = [], ""
+        for aid in SIM_STRATEGY_IDS:
+            acct = self._get_account(aid)
+            for t in acct.get_trades(500):
+                if str(t.get("code", "")).zfill(6) != code:
+                    continue
+                if not name:
+                    name = t.get("name", "")
+                marks.append({
+                    "date": t.get("trade_date"), "direction": t.get("direction"),
+                    "price": t.get("price"), "quantity": t.get("quantity"),
+                    "account": aid, "cn": SIM_STRATEGY_CN.get(aid, aid),
+                    "reason": t.get("reason") or "",
+                })
+        for aid in SIM_STRATEGY_IDS:
+            if name:
+                break
+            acct = self._get_account(aid)
+            pos = acct.positions.get(code)
+            if pos:
+                name = pos.name
+        marks.sort(key=lambda m: (m.get("date") or "", m.get("direction") or ""))
+        self._json({"ok": True, "data": {
+            "code": code, "name": name, "candles": candles,
+            "marks": marks, "source_error": src_err,
         }})
 
     def _sim_summary(self, account: str = None) -> None:

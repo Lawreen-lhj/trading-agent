@@ -25,8 +25,10 @@
 | save_screening / screening_by_date | screening_results | 选股结果写入/检索 |
 | save_review / review_by_date / reviews_recent | reviews | 四维复盘 upsert/检索 |
 | save_monitor_alerts / monitor_alerts_recent / monitor_alert_stats | monitor_alerts | 盘中告警增量写入(INSERT OR IGNORE)/检索/统计 |
+| save_pulse_snapshot(run_date,ts,snap) / pulse_snapshots_today(run_date,limit) | pulse_snapshots | 行情脉搏每次采集落一行日内快照/当日按时间正序取（供北向趋势 sparkline） |
+| log_activity(run_date,ts,kind,message,strategy,detail) / activity_recent(run_date,limit) | activity_log | 系统活动流写入/检索（正序返回，前端倒序展示） |
 
-### market.db 全部表（9 张业务表）
+### market.db 全部表（11 张业务表）
 
 | 表 | 主键 | 字段与用途 |
 |----|------|-----------|
@@ -36,9 +38,11 @@
 | **plans** | run_date,code | name/ready/score/buy_lo/buy_hi/stop/target1/target2/rr/risk_pct/shares/amount/why —— 交易计划存档，事后核对能否成交 |
 | **strategy_signals** | id(自增) | run_date/strategy/code/name/direction/strength/price/buy_lo/buy_hi/stop/target1/target2/rr/shares/hold_days/confidence/market_phase/reason/extra_json/created_at |
 | **sentiment_history** | run_date | score/phase/limit_up/limit_down/up_ratio/median_pct/board_height/yesterday_perf/total_amount/detail_json/created_at |
-| **screening_results** | run_date,code | name/layer1_pass/layer2_pass/layer3_pass/patterns/score/rank/detail_json |
+| **screening_results** | run_date,code | name/layer1_pass/layer2_pass/layer3_pass/patterns/score/rank/detail_json；detail_json 内含 reasons/plan/strategy_hits/via_strategy，「策略直命·未过漏斗」的补录票 layer3_pass 记 0（未走三层漏斗风控门），WebUI 据 via_strategy 打琥珀徽章 |
 | **reviews** | run_date | overall_score/market_json/stocks_json/strategies_json/behavior_json/insights_json/actions_json/created_at |
 | **monitor_alerts** | id(自增),alert_id UNIQUE | run_date/level/category/rule/code/name/message/data_json/notified/created_at —— 盘中实时告警（区别于 alerts 表） |
+| **pulse_snapshots** | id(自增) | run_date/ts/north_net/zt_count/broken_count/ld_count/top_sector/top_sector_net/created_at —— 行情脉搏每次采集的日内快照（idx_pulse_date） |
+| **activity_log** | id(自增) | run_date/ts/kind/strategy/message/detail_json/created_at —— 系统活动流（idx_activity_date(run_date,id)） |
 
 ## 二、配置存储（configstore）
 

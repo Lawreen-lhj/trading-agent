@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 SCHEMA = """
@@ -159,6 +160,34 @@ CREATE TABLE IF NOT EXISTS monitor_alerts (
 
 CREATE INDEX IF NOT EXISTS idx_monitor_alerts_date ON monitor_alerts(run_date);
 CREATE INDEX IF NOT EXISTS idx_monitor_alerts_level ON monitor_alerts(level, run_date);
+
+-- 资金脉搏盘中快照：每次 /api/pulse 采集成功落一行，供日内趋势 sparkline。
+CREATE TABLE IF NOT EXISTS pulse_snapshots (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date       TEXT NOT NULL,
+    ts             TEXT NOT NULL,
+    north_net      REAL,
+    zt_count       INTEGER,
+    broken_count   INTEGER,
+    ld_count       INTEGER,
+    top_sector     TEXT,
+    top_sector_net REAL,
+    created_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pulse_date ON pulse_snapshots(run_date);
+
+-- 系统活动流：run_sim_live / 采集器每轮 append，WebUI 实时展示"系统在干什么"。
+CREATE TABLE IF NOT EXISTS activity_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date    TEXT NOT NULL,
+    ts          TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    strategy    TEXT,
+    message     TEXT,
+    detail_json TEXT,
+    created_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_date ON activity_log(run_date, id);
 """
 
 
@@ -590,6 +619,80 @@ class Store:
         )
         stats = {r[0]: r[1] for r in cur.fetchall()}
         return {"p0": stats.get("P0", 0), "p1": stats.get("P1", 0), "p2": stats.get("P2", 0)}
+
+    # ── 资金脉搏快照 ────────────────────────────────────────────────
+    def save_pulse_snapshot(self, run_date: str, ts: str, snap: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO pulse_snapshots"
+            " (run_date, ts, north_net, zt_count, broken_count, ld_count,"
+            "  top_sector, top_sector_net, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                run_date, ts,
+                snap.get("north_net"), snap.get("zt_count"),
+                snap.get("broken_count"), snap.get("ld_count"),
+                snap.get("top_sector"), snap.get("top_sector_net"),
+                datetime.now().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def pulse_snapshots_today(self, run_date: str, limit: int = 120) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT ts, north_net, zt_count, broken_count, ld_count,"
+            " top_sector, top_sector_net FROM pulse_snapshots"
+            " WHERE run_date=? ORDER BY id DESC LIMIT ?",
+            (run_date, limit),
+        )
+        rows = [
+            {
+                "ts": r[0], "north_net": r[1], "zt_count": r[2],
+                "broken_count": r[3], "ld_count": r[4],
+                "top_sector": r[5], "top_sector_net": r[6],
+            }
+            for r in cur.fetchall()
+        ]
+        rows.reverse()
+        return rows
+
+    # ── 系统活动流 ──────────────────────────────────────────────────
+    def log_activity(self, run_date: str, ts: str, kind: str,
+                     message: str, strategy: str = None, detail: dict = None) -> None:
+        self.conn.execute(
+            "INSERT INTO activity_log"
+            " (run_date, ts, kind, strategy, message, detail_json, created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (
+                run_date, ts, kind, strategy, message,
+                json.dumps(detail, ensure_ascii=False) if detail else None,
+                datetime.now().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def activity_recent(self, run_date: str = None, limit: int = 60) -> list[dict]:
+        if run_date:
+            cur = self.conn.execute(
+                "SELECT run_date, ts, kind, strategy, message, detail_json"
+                " FROM activity_log WHERE run_date=? ORDER BY id DESC LIMIT ?",
+                (run_date, limit),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT run_date, ts, kind, strategy, message, detail_json"
+                " FROM activity_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        rows = [
+            {
+                "date": r[0], "ts": r[1], "kind": r[2], "strategy": r[3],
+                "message": r[4],
+                "detail": json.loads(r[5]) if r[5] else None,
+            }
+            for r in cur.fetchall()
+        ]
+        rows.reverse()
+        return rows
 
     def close(self) -> None:
         self.conn.close()

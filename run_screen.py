@@ -21,6 +21,14 @@
     python3 run_screen.py --write         # 把 Top pick 写回 config.yaml watchlist（自动备份）
     python3 run_screen.py --replace       # 写回时替换整个自选池（默认是合并去重）
     python3 run_screen.py --save          # 结果落库 screening_results 表
+    python3 run_screen.py --no-events     # 跳过事件源采集（event_driven 直接空仓）
+
+四策略并行扫描（与模拟盘 run_sim 同口径）：
+    第二段精算完成后，在候选池上并行跑 board_hit/trend_pullback/oversold_bounce/
+    event_driven 四个策略的 scan()（相位门 → K线依赖门 → 事件注入 → scan），
+    命中信号挂回候选的 strategy_hits（入选理由里逐条带强度/买卖区间/止损/盈亏比），
+    报告另附「四策略并行扫描」段：每策略命中名单或如实空仓原因（相位不适配/
+    K线源限流/无新鲜事件/无符合条件标的）。最终候选按「适配策略数 → 短线评分」排序。
 
 注意：本脚本只做选股分析，不存在任何下单代码路径。
 """
@@ -263,24 +271,117 @@ def stage2_enrich(candidates: list[dict]) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 四策略并行扫描：把模拟盘的策略视角叠加到选股候选上
+# ═══════════════════════════════════════════════════════════════════════
+
+def strategy_overlay(enriched: list[dict], sentiment: dict, cfg: dict,
+                     with_events: bool = True) -> dict:
+    """在第二段候选上并行跑四种策略，返回 {策略名: {cn, note, hits:[...]}}。
+
+    与 run_sim.run_strategy 同口径的门控顺序：
+      相位适配 → K线依赖（限流则如实空仓）→ 事件注入（event_driven）→ scan。
+    区别只在扫描域：这里是第二段精算候选（带完整日线指标），而非自选池。
+    命中信号同时挂回候选字典的 strategy_hits，供入选理由/落库/WebUI 展示。
+    """
+    import run_sim  # 延迟导入：仅策略叠加需要（复用其常量与事件源）
+    from src.strategies import get_strategy
+
+    phase = (sentiment or {}).get("phase", "中性")
+    strat_cfg_all = cfg.get("strategies") or {}
+    capital = (cfg.get("simulation") or {}).get("initial_capital", 100000)
+    risk_pct = (cfg.get("risk") or {}).get("single_risk_pct", 1.0)
+
+    events: list = []
+    if with_events:
+        codes = [c.get("code", "") for c in enriched if c.get("code")]
+        try:
+            now = datetime.now()
+            events = [e for e in run_sim.fetch_events(codes)
+                      if (now - e.publish_time).total_seconds() / 3600 <= 48]
+            log.info("候选池 48h 新鲜利好事件：%d 条", len(events))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("事件源采集失败（event_driven 将空仓）：%s", exc)
+
+    kline_ok = bool(enriched)  # 第二段能算出完整指标即视为 K线源可用
+    view: dict = {}
+    for name in run_sim.STRATEGY_IDS:
+        cn = run_sim.STRATEGY_CN.get(name, name)
+        entry = {"cn": cn, "note": "", "hits": []}
+        view[name] = entry
+
+        strat_cfg = dict(strat_cfg_all.get(name, {}) or {})
+        strat_cfg["capital"] = capital
+        strat_cfg["single_risk_pct"] = risk_pct
+        strategy = get_strategy(name, strat_cfg)
+        if strategy is None:
+            entry["note"] = "策略未注册"
+            continue
+        if not strategy.is_suitable(phase):
+            entry["note"] = (f"空仓·相位不适配：当前情绪「{phase}」，"
+                             f"本策略适合 {strategy.suitable_phases}")
+            continue
+        if name in run_sim.KLINE_DEPENDENT and not kline_ok:
+            entry["note"] = ("空仓·K线指标源被限流，无法计算 "
+                             + "/".join(run_sim.KLINE_DEPENDENT[name]))
+            continue
+        if name == "event_driven":
+            if not events:
+                entry["note"] = "空仓·候选池内无 48h 内的新鲜利好事件"
+                continue
+            strategy.add_events(events)
+        try:
+            signals = strategy.scan(enriched, {"sentiment": sentiment or {}})
+        except Exception as exc:  # noqa: BLE001
+            entry["note"] = f"scan 异常：{type(exc).__name__} {str(exc)[:60]}"
+            continue
+        for sig in signals:
+            hit = {
+                "strategy": name, "cn": cn, "code": sig.code, "name": sig.name,
+                "strength": round(float(sig.strength), 3), "reason": sig.reason,
+                "price": sig.price, "buy_lo": sig.buy_lo, "buy_hi": sig.buy_hi,
+                "stop": sig.stop, "target1": sig.target1,
+                "rr": round(sig.rr, 2) if sig.rr else None, "shares": sig.shares,
+            }
+            entry["hits"].append(hit)
+            for c in enriched:
+                if c.get("code") == sig.code:
+                    c.setdefault("strategy_hits", []).append(hit)
+                    break
+        if not entry["hits"] and not entry["note"]:
+            entry["note"] = "扫描完成·无符合买入条件的标的"
+    view["_events_count"] = len(events)
+    return view
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 最终筛选与输出
 # ═══════════════════════════════════════════════════════════════════════
 
-def run_screen(cfg: dict, top_n: int = 30) -> dict:
-    """完整跑一次两段漏斗选股。"""
+def run_screen(cfg: dict, top_n: int = 30, with_events: bool = True) -> dict:
+    """完整跑一次两段漏斗选股 + 四策略并行扫描叠加。"""
     t_start = time.time()
 
-    # 情绪数据（驱动第二层市场环境过滤）
-    sentiment = {}
+    # 情绪数据（驱动第二层市场环境过滤 + 四策略相位门）
+    # 优先与模拟盘同口径的 run_sim.compute_sentiment（降级感知、含因子明细）；
+    # 失败再回落到 extras 粗判相位
+    sentiment: dict = {}
     try:
-        extras = collect_sentiment_data()
-        sentiment = {
-            "phase": _phase_from_extras(extras),
-            "max_board_height": extras.get("max_board_height", 0),
-        }
-    except Exception as exc:
-        log.warning("情绪采集失败，用中性阶段：%s", exc)
-        sentiment = {"phase": "中性"}
+        import run_sim  # 延迟导入：情绪/策略路径才需要
+        sentiment = run_sim.compute_sentiment() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("run_sim 情绪口径失败（%s），回落粗判", exc)
+    if not sentiment.get("phase"):
+        try:
+            extras = collect_sentiment_data()
+            sentiment = {
+                "phase": _phase_from_extras(extras),
+                "max_board_height": extras.get("max_board_height", 0),
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("情绪采集失败，用中性阶段：%s", exc)
+            sentiment = {"phase": "中性"}
+    sentiment.setdefault("max_board_height",
+                         (sentiment.get("_raw") or {}).get("max_height", 0))
 
     # 第一段
     universe, uni_src = build_universe()
@@ -293,18 +394,80 @@ def run_screen(cfg: dict, top_n: int = 30) -> dict:
     # 探测日线主源
     _probe_em_kline()
 
+    # 涨停池注入：board_hit 的原生域是今日涨停/连板票，而第一段预排序结构性排除
+    # >9% 的票（防追高），这里把涨停池头部直接补进第二段扫描域，字段映射与
+    # run_sim.build_stocks 同口径（limit_pct/board_height/seal_amount/sector_limit_count…）
+    scan_domain = list(narrowed)
+    try:
+        have = {c["code"] for c in scan_domain}
+        pool_rows = limit_up_pool()
+        pool_rows.sort(key=lambda s: -(((s.get("limit_days") or 1) * 1e12) + (s.get("seal_fund") or 0)))
+        added = 0
+        for s in pool_rows:
+            if added >= 10:
+                break
+            code = str(s.get("code", "")).zfill(6)
+            if not code or code in have:
+                continue
+            have.add(code)
+            if code.startswith(("300", "301", "688", "689")):
+                limit_pct = 20.0
+            elif code.startswith(("8", "4", "9")):
+                limit_pct = 30.0
+            else:
+                limit_pct = 10.0
+            scan_domain.append({
+                "code": code, "name": s.get("name", ""), "close": s.get("price"),
+                "pct_chg": s.get("pct"), "amount": s.get("amount"),
+                "turnover": s.get("turnover"), "vol_ratio": None,
+                "market_cap": s.get("float_cap"),
+                "limit_pct": limit_pct,
+                "float_market_cap": s.get("float_cap"),
+                "board_height": s.get("limit_days", 1),
+                "seal_amount": s.get("seal_fund", 0),
+                "sector_limit_count": s.get("sector_limit_count", 0),
+                "break_times": s.get("break_times", 0),
+                "industry": s.get("industry", ""),
+                "in_limit_pool": True,
+                "from_limit_pool": True,
+            })
+            added += 1
+        if added:
+            log.info("涨停池注入扫描域 %d 只（连板+封单头部）", added)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("涨停池注入失败（board_hit 仍用漏斗域）：%s", exc)
+
     # 第二段
-    enriched = stage2_enrich(narrowed)
+    enriched = stage2_enrich(scan_domain)
     log.info("第二段：%d 只候选取到完整指标", len(enriched))
     if not enriched:
         return {"ok": False, "error": "候选日线全部获取失败", "sentiment": sentiment,
                 "universe_source": uni_src, "stage1": s1_stats}
 
+    # 四策略并行扫描（在漏斗前挂 strategy_hits，候选字典同源继承）
+    strategy_view = strategy_overlay(enriched, sentiment, cfg, with_events=with_events)
+
     # 完整三层漏斗 + 评分（screen_stocks 内部会再跑一遍 hard_filter/量价/位置/形态/评分）
     result = screen_stocks(enriched, sentiment, cfg.get("screener") or {})
 
-    # 为最终候选补交易计划 + 入选理由
+    # 策略直命补录：漏斗淘汰但被策略命中的票，作为「策略直命」补进候选
+    # （漏斗是风控门，策略命中是进攻信号，两者都摆出来由人决策）
     candidates = result.get("candidates", [])
+    cand_codes = {c.get("code") for c in candidates}
+    for c in enriched:
+        if c.get("strategy_hits") and c.get("code") not in cand_codes:
+            c["via_strategy"] = True
+            try:
+                total, label, _ = st_score(c)
+                c["screen_score"] = total
+                c["screen_label"] = label
+            except Exception:  # noqa: BLE001
+                c.setdefault("screen_score", 0)
+                c.setdefault("screen_label", "")
+            candidates.append(c)
+            cand_codes.add(c.get("code"))
+
+    # 为最终候选补交易计划 + 入选理由（理由含策略命中行）
     for c in candidates:
         try:
             total, label, _ = st_score(c)
@@ -313,11 +476,17 @@ def run_screen(cfg: dict, top_n: int = 30) -> dict:
             c["plan"] = {}
         c["reasons"] = build_reasons(c)
 
+    # 排序：适配策略数优先、其次短线评分——漏斗与策略共振的票更可执行
+    candidates.sort(key=lambda c: (-len(c.get("strategy_hits") or []),
+                                   -(c.get("screen_score") or 0)))
+
     result["ok"] = True
     result["universe_source"] = uni_src
     result["sentiment"] = sentiment
     result["stage1"] = s1_stats
     result["enriched_count"] = len(enriched)
+    result["strategy_view"] = strategy_view
+    result["events_count"] = strategy_view.pop("_events_count", 0)
     result["elapsed"] = round(time.time() - t_start, 1)
     return result
 
@@ -470,6 +639,23 @@ def build_reasons(c: dict) -> list[str]:
     if bits:
         reasons.append("板池背景：" + "，".join(bits))
 
+    # 四策略共振（strategy_overlay 挂回的命中信号，逐条带触发数字）
+    for h in c.get("strategy_hits") or []:
+        bits = [f"强度 {h.get('strength', 0):.2f}"]
+        if h.get("buy_lo") and h.get("buy_hi"):
+            bits.append(f"买 {h['buy_lo']:.2f}-{h['buy_hi']:.2f}")
+        if h.get("stop"):
+            bits.append(f"止损 {h['stop']:.2f}")
+        if h.get("target1"):
+            bits.append(f"目标 {h['target1']:.2f}")
+        if h.get("rr"):
+            bits.append(f"盈亏比 {h['rr']:.1f}")
+        reasons.append(f"适配策略 {h.get('cn', h.get('strategy'))}："
+                       + "，".join(bits)
+                       + (f"（{h.get('reason', '')}）" if h.get("reason") else ""))
+    if c.get("via_strategy"):
+        reasons.append("注：未过三层漏斗（风控门），由策略扫描直接命中，仓位请自行降档")
+
     return reasons
 
 
@@ -501,7 +687,7 @@ def format_report(result: dict, pick: int) -> str:
     lines.append("")
 
     cands = result.get("candidates", [])
-    lines.append(f"最终候选（Top {min(pick, len(cands))} / 共 {len(cands)} 只）：")
+    lines.append(f"最终候选（Top {min(pick, len(cands))} / 共 {len(cands)} 只，按适配策略数→评分排序）：")
     for i, c in enumerate(cands[:pick], 1):
         code = c.get("code", "")
         name = c.get("name", "") or code
@@ -511,8 +697,10 @@ def format_report(result: dict, pick: int) -> str:
         pct = c.get("pct_chg")
         close_txt = f"{close:.2f}" if close else "-"
         pct_txt = f"{pct:+.1f}%" if pct is not None else "-"
+        n_strat = len(c.get("strategy_hits") or [])
+        strat_txt = f"    适配策略 {n_strat}" + ("（策略直命·未过漏斗）" if c.get("via_strategy") else "") if n_strat else ""
         lines.append("=" * 64)
-        lines.append(f"#{i}  {code} {name}    评分 {score}（{label}）    现价 {close_txt}（{pct_txt}）")
+        lines.append(f"#{i}  {code} {name}    评分 {score}（{label}）    现价 {close_txt}（{pct_txt}）{strat_txt}")
         # 入选理由（逐条带数字）
         for r in c.get("reasons", []):
             lines.append(f"    · {r}")
@@ -525,6 +713,22 @@ def format_report(result: dict, pick: int) -> str:
             )
         else:
             lines.append(f"    → 暂无计划：{plan.get('why', '不满足条件')}")
+
+    # 四策略并行扫描（与模拟盘同口径门控；空仓如实给原因）
+    view = result.get("strategy_view") or {}
+    if view:
+        lines.append("")
+        lines.append(f"四策略并行扫描（扫描域=第二段候选 {result.get('enriched_count', 0)} 只 · "
+                     f"48h 新鲜事件 {result.get('events_count', 0)} 条）：")
+        for name, e in view.items():
+            if str(name).startswith("_"):
+                continue
+            hits = e.get("hits") or []
+            head = e.get("note") or f"{len(hits)} 只命中"
+            lines.append(f"  [{e.get('cn', name)}] {head}")
+            for h in hits:
+                lines.append(f"      · {h.get('code')} {h.get('name', '')} 强度 {h.get('strength', 0):.2f}"
+                             + (f"  {h.get('reason', '')}" if h.get("reason") else ""))
     lines.append("=" * 64)
     return "\n".join(lines)
 
@@ -566,12 +770,15 @@ def save_to_db(result: dict, day: str) -> int:
     cands = result.get("candidates", [])
     records = []
     for c in cands:
+        via = bool(c.get("via_strategy"))
         records.append({
             "code": c.get("code"),
             "name": c.get("name"),
             "layer1_pass": True,
             "layer2_pass": True,
-            "layer3_pass": True,
+            # 策略直命的补录票没走三层漏斗（风控门），如实记 0，别假装它过了
+            "layer3_pass": not via,
+            "via_strategy": via,
             "patterns": c.get("patterns", []),
             "score": c.get("screen_score"),
             "screen_label": c.get("screen_label"),
@@ -579,6 +786,7 @@ def save_to_db(result: dict, day: str) -> int:
             "pct_chg": c.get("pct_chg"),
             "plan": c.get("plan"),
             "reasons": c.get("reasons", []),
+            "strategy_hits": c.get("strategy_hits", []),
         })
     store = Store(ROOT / "data" / "market.db")
     try:
@@ -596,6 +804,7 @@ def main() -> int:
     ap.add_argument("--write", action="store_true", help="把 Top pick 写回 config.yaml watchlist")
     ap.add_argument("--replace", action="store_true", help="写回时替换整个自选池（默认合并去重）")
     ap.add_argument("--save", action="store_true", help="结果落库 screening_results 表")
+    ap.add_argument("--no-events", action="store_true", help="跳过事件源采集（event_driven 直接空仓）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -608,7 +817,7 @@ def main() -> int:
     cfg = configstore.load(args.config)
     day = datetime.now().strftime("%Y-%m-%d")
 
-    result = run_screen(cfg, top_n=args.top)
+    result = run_screen(cfg, top_n=args.top, with_events=not args.no_events)
     print(format_report(result, args.pick))
 
     if not result.get("ok"):

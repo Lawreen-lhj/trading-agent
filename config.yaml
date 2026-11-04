@@ -165,6 +165,8 @@ simulation:
     max_hold_days: 5
     min_cash_reserve: 5000
   auto_trade: false
+  # 候选池扩容：idle 策略除自选池外，再扫当日主力净流入 TopN（0=关闭，回退纯自选池）
+  flow_pool_topn: 15
 monitor:
   enabled: true
   interval_seconds: 15

@@ -18,12 +18,21 @@ const S = {
   simDetail: null,
   simMode: 'single',
   simCompare: null,
+  simKlineCode: null,
+  simKline: null,
+  simKlineLoading: null,
   simLoading: false,
   simErr: null,
+  pulse: null,
+  pulseErr: null,
+  pulseBoard: 'industry',
+  activity: null,
+  activityErr: null,
 };
 
 const TITLES = {
   dashboard: ['仪表盘', '今天的市场状态与可执行计划'],
+  pulse: ['行情脉搏', '当日主力资金 / 大单异动 / 涨停炸板 · 60s 自动刷新'],
   screening: ['选股', '两段漏斗全市场选股 · 每只票附入选理由'],
   plans: ['交易计划', '买点 / 止损 / 目标 / 仓位，全部由规则算出'],
   watch: ['自选池', '短线池建议 10–20 只，太多会看不过来'],
@@ -105,9 +114,9 @@ function render() {
   $('#page-sub').textContent = sub + (b ? `　·　数据日期 ${b.date}（生成于 ${b.generated_at}）` : '　·　尚无简报');
   updateNav();
   const fn = {
-    dashboard: viewDashboard, screening: viewScreening, plans: viewPlans, watch: viewWatch,
-    holdings: viewHoldings, simulation: viewSimulation, alerts: viewAlerts, history: viewHistory,
-    settings: viewSettings,
+    dashboard: viewDashboard, pulse: viewPulse, screening: viewScreening, plans: viewPlans,
+    watch: viewWatch, holdings: viewHoldings, simulation: viewSimulation, alerts: viewAlerts,
+    history: viewHistory, settings: viewSettings,
   }[S.view];
   $('#stage').innerHTML = fn();
 }
@@ -139,6 +148,154 @@ function updateNav() {
   }
 }
 
+/* ---------------- 数据：行情脉搏 / 系统活动流 ---------------- */
+function loadPulse(force) {
+  if (S.pulse && !force) return Promise.resolve();
+  return api('/api/pulse')
+    .then((d) => { S.pulse = d; S.pulseErr = null; })
+    .catch((e) => { S.pulseErr = e.message; });
+}
+function loadActivity(limit) {
+  return api(`/api/activity?limit=${limit || 40}`)
+    .then((d) => { S.activity = d; S.activityErr = null; })
+    .catch((e) => { S.activityErr = e.message; });
+}
+function ensurePulse() {
+  loadPulse().then(() => { if (S.view === 'pulse') render(); });
+  loadActivity(40).then(() => { if (S.view === 'pulse' || S.view === 'dashboard') render(); });
+}
+function ensureActivity() {
+  loadActivity(10).then(() => { if (S.view === 'dashboard') render(); });
+}
+
+const ACT_KIND_STYLE = {
+  buy: 'hold', sell: 'ok', skip: 'gray', scan: 'blue', warn: 'bad',
+  start: 'blue', rescan: 'blue', snapshot: 'ok', info: 'gray',
+};
+const ACT_KIND_CN = {
+  buy: '买入', sell: '卖出', skip: '跳过', scan: '扫描', warn: '告警',
+  start: '启动', rescan: '补扫', snapshot: '快照', info: '信息',
+};
+
+function activitySection(limit) {
+  const rows = (S.activity || []).slice(-limit);
+  const body = rows.length ? `
+  <div class="card tight"><div class="tw"><table>
+    <thead><tr><th style="width:70px">时间</th><th style="width:64px">类型</th><th style="width:96px">策略</th><th>内容</th></tr></thead>
+    <tbody>
+    ${rows.slice().reverse().map((r) => `<tr>
+      <td class="muted" style="font-size:11.5px">${esc(r.ts)}</td>
+      <td><span class="pill ${ACT_KIND_STYLE[r.kind] || 'gray'}">${esc(ACT_KIND_CN[r.kind] || r.kind)}</span></td>
+      <td class="muted" style="font-size:11.5px">${esc(r.strategy || '—')}</td>
+      <td style="font-size:12.5px">${esc(r.message || '')}</td>
+    </tr>`).join('')}
+    </tbody>
+  </table></div></div>`
+    : `<div class="empty">暂无系统活动。run_sim_live.py 运行后每轮扫描/跳过/买卖/快照会逐条落盘到这里。</div>`;
+  return `<h2 class="sec">系统活动流</h2>${body}`;
+}
+
+function pulseSpark(trend, key, color) {
+  const vals = (trend || []).map((t) => t[key]).filter((v) => v != null);
+  if (vals.length < 2) return `<div class="muted" style="font-size:11.5px">日内采样不足（每次刷新脉搏落一个点）。</div>`;
+  const W = 600, H = 90, P = 6;
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
+  const X = (i) => P + i / (vals.length - 1) * (W - 2 * P);
+  const Y = (v) => P + (hi - v) / span * (H - 2 * P);
+  const pts = vals.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:70px">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"/>
+  </svg>
+  <div class="muted" style="font-size:11px">区间 ${lo.toFixed(1)} ~ ${hi.toFixed(1)} · ${vals.length} 个采样点</div>`;
+}
+
+/* ---------------- 视图：行情脉搏 ---------------- */
+function viewPulse() {
+  if (!S.pulse) {
+    ensurePulse();
+    if (S.pulseErr) return `<div class="empty"><b>行情脉搏加载失败</b>${esc(S.pulseErr)}</div>`;
+    return `<div class="empty">加载行情脉搏…</div>`;
+  }
+  const p = S.pulse;
+  const zt = p.zt || {};
+  const north = p.north || {};
+  const board = S.pulseBoard;
+  const sectors = board === 'concept' ? (p.sector_concept || []) : (p.sector_industry || []);
+
+  const kpis = `
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:14px">
+    ${simKpi('涨停', zt.zt_count != null ? zt.zt_count : '—', 'up')}
+    ${simKpi('炸板', zt.zb_count != null ? zt.zb_count : '—', 'down')}
+    ${simKpi('跌停', zt.dt_count != null ? zt.dt_count : '—', 'down')}
+    ${simKpi('最高连板', zt.max_height != null ? zt.max_height + ' 板' : '—', '')}
+    ${simKpi('炸板率', zt.break_rate != null ? zt.break_rate + '%' : '—', '')}
+    ${simKpi('北向净流入', north.total != null ? north.total + ' 亿' : '—', cls(north.total))}
+  </div>`;
+
+  const sectorRows = (sectors || []).map((s) => `<tr>
+    <td class="name"><b>${esc(s.name)}</b></td>
+    <td class="r n ${cls(s.pct_chg)}">${pct(s.pct_chg)}</td>
+    <td class="r n ${cls(s.net_flow)}">${(s.net_flow / 1e8).toFixed(1)} 亿</td>
+    <td class="r n ${cls(s.super_large)}">${(s.super_large / 1e8).toFixed(1)} 亿</td>
+    <td class="r n ${cls(s.large)}">${(s.large / 1e8).toFixed(1)} 亿</td>
+    <td class="muted" style="font-size:11.5px">${esc(s.lead_stock || '')}${s.lead_pct != null ? ' ' + pct(s.lead_pct) : ''}</td>
+  </tr>`).join('');
+
+  const stockTable = (rows, title) => `
+  <div class="card tight"><div class="tw">
+    <div style="padding:10px 12px 6px;font-weight:600">${esc(title)}</div>
+    <table>
+    <thead><tr><th>标的</th><th class="r">现价</th><th class="r">涨幅</th><th class="r">主力净流入</th><th class="r">超大单</th><th class="r">净占比</th></tr></thead>
+    <tbody>
+    ${(rows || []).map((s) => `<tr>
+      <td class="name"><b>${esc(s.name)}</b><div class="code">${esc(s.code)}</div></td>
+      <td class="r n">${num(s.price)}</td>
+      <td class="r n ${cls(s.pct_chg)}">${pct(s.pct_chg)}</td>
+      <td class="r n ${cls(s.net_flow)}">${(s.net_flow / 1e8).toFixed(2)} 亿</td>
+      <td class="r n ${cls(s.super_large)}">${(s.super_large / 1e8).toFixed(2)} 亿</td>
+      <td class="r n ${Math.abs(s.net_ratio || 0) >= 10 ? 'up' : 'muted'}">${(s.net_ratio || 0).toFixed(1)}%</td>
+    </tr>`).join('')}
+    </tbody>
+    </table>
+  </div></div>`;
+
+  const errLine = (p.errors || []).length
+    ? `<div class="empty" style="margin-top:8px">部分数据源降级：${esc((p.errors || []).join('；'))}</div>` : '';
+
+  return `
+  <div class="toolbar" style="margin-bottom:12px;align-items:center">
+    <span class="pill ok" style="font-size:13px">采样 ${esc(p.ts)}</span>
+    <span class="muted" style="font-size:12px">60s 自动刷新 · 东财 push2 主力净流入口径</span>
+    <span class="spacer"></span>
+    <div class="seg">
+      <button data-act="pulse-board" data-v="industry" class="${board === 'industry' ? 'on' : ''}">行业板块</button>
+      <button data-act="pulse-board" data-v="concept" class="${board === 'concept' ? 'on' : ''}">概念板块</button>
+    </div>
+    <button class="btn ghost" data-act="pulse-refresh">刷新</button>
+  </div>
+
+  ${kpis}
+
+  <h2 class="sec">${board === 'concept' ? '概念' : '行业'}板块主力净流入 Top</h2>
+  <div class="card tight"><div class="tw"><table>
+    <thead><tr><th>板块</th><th class="r">涨跌幅</th><th class="r">主力净流入</th><th class="r">超大单</th><th class="r">大单</th><th>领涨股</th></tr></thead>
+    <tbody>${sectorRows || `<tr><td colspan="6" class="muted">暂无板块资金流数据。</td></tr>`}</tbody>
+  </table></div></div>
+
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr));margin-top:14px">
+    ${stockTable(p.stock_in, '个股主力净流入 Top（大手笔买入）')}
+    ${stockTable(p.stock_out, '个股主力净流出 Top（大手笔卖出）')}
+  </div>
+
+  <h2 class="sec">北向资金日内趋势</h2>
+  <div class="card">${pulseSpark(p.trend, 'north_net', 'var(--ink-2)')}</div>
+
+  ${errLine}
+
+  ${activitySection(40)}
+  `;
+}
+
 /* ---------------- 视图：仪表盘 ---------------- */
 function viewDashboard() {
   const d = S.data, b = d.brief;
@@ -157,6 +314,10 @@ function viewDashboard() {
 
   const health = (b.data_health || []);
   const notes = (b.data_notes || []);
+
+  if (!S.activity) ensureActivity();
+  if (!S.pulse) loadPulse().then(() => { if (S.view === 'dashboard') render(); });
+  const liveIdx = (S.pulse && (S.pulse.indices || []).length) ? S.pulse.indices : null;
 
   return `
   ${health.length ? `<div class="banner"><div><b>数据缺口 ${health.length} 项：</b>${esc(health.join('；'))}
@@ -197,9 +358,9 @@ function viewDashboard() {
     </div>
   </div>
 
-  <h2 class="sec">指数与外围</h2>
+  <h2 class="sec">指数与外围${liveIdx ? `　<span class="pill blue">实时 ${esc(S.pulse.ts)}</span>` : '　<span class="pill gray">来自日报快照</span>'}</h2>
   <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(148px,1fr))">
-    ${(m.indices || []).map((i) => `
+    ${(liveIdx || m.indices || []).map((i) => `
       <div class="card" style="padding:13px 15px">
         <div class="kpi-l">${esc(i.name)}</div>
         <div class="kpi-v">${num(i.close)}</div>
@@ -281,7 +442,9 @@ function viewDashboard() {
         ${notes.map((n) => `<div class="list-i"><i class="dot"></i><div class="t muted">${esc(n)}</div></div>`).join('')}
       </div>
     </div>
-  </div>`;
+  </div>
+
+  ${activitySection(10)}`;
 }
 
 /* ---------------- 视图：交易计划 ---------------- */
@@ -584,12 +747,18 @@ function screenCard(r) {
     ? `买 ${Number(plan.buy_lo).toFixed(2)}-${Number(plan.buy_hi).toFixed(2)}　止损 ${Number(plan.stop).toFixed(2)}　盈亏比 ${Number(plan.rr).toFixed(1)}　建议 ${plan.shares} 股`
     : `暂无计划：${esc(plan.why || '不满足条件')}`;
   const pats = (r.patterns || []).join('、');
+  const hits = r.strategy_hits || [];
+  const hitTxt = hits
+    .map((h) => `${esc(h.cn || h.strategy)} ${Number(h.strength || 0).toFixed(2)}`)
+    .join(' · ');
   return `
   <div class="card" style="margin-bottom:10px">
     <div class="card-h">
       <div class="card-t">
         <span class="muted">#${r.rank}</span>　${esc(r.code)}　${esc(r.name)}
         <span class="pill" style="margin-left:6px">${esc(r.screen_label || '')}</span>
+        ${hits.length ? `<span class="pill blue" style="margin-left:6px">适配策略 ${hits.length}：${hitTxt}</span>` : ''}
+        ${r.via_strategy ? `<span class="pill P1" style="margin-left:6px">策略直命·未过漏斗</span>` : ''}
       </div>
       <div class="card-s">
         评分 <b class="num">${r.score ?? '—'}</b>　现价 <b class="num">${closeTxt}</b>
@@ -694,6 +863,8 @@ function viewSimulation() {
 
   if (cmpMode) return toolbar + simCompareBody(S.simCompare);
 
+  const klineSec = simKlineSection(positions, trades);
+
   return toolbar + `
   <div class="simtabs">${tabs}</div>
 
@@ -732,6 +903,8 @@ function viewSimulation() {
     }).join('')}
     </tbody>
   </table></div></div>` : `<div class="empty">当前空仓。该策略账户在本轮情绪相位/数据条件下未建仓（详见运行说明）。</div>`}
+
+  ${klineSec}
 
   <h2 class="sec">成交流水</h2>
   ${trades.length ? `
@@ -838,6 +1011,108 @@ function simCompareBody(cmp) {
   <h2 class="sec">四策略横向对比</h2>
   ${table}
   <div class="simcmp">${cards}</div>`;
+}
+
+function ensureSimKline(code) {
+  S.simKline = S.simKline || {};
+  if (S.simKline[code] || S.simKlineLoading === code) return;
+  S.simKlineLoading = code;
+  api(`/api/simulation/kline?code=${encodeURIComponent(code)}&days=160`)
+    .then((d) => { S.simKline[code] = d; })
+    .catch((e) => { S.simKline[code] = { code, name: '', candles: [], marks: [], source_error: e.message }; })
+    .finally(() => { S.simKlineLoading = null; if (S.view === 'simulation') render(); });
+}
+
+function simKlineSection(positions, trades) {
+  const pos = positions || [], trd = trades || [];
+  const codes = [...new Set([...pos.map((p) => p.code), ...trd.map((t) => t.code)])].filter(Boolean);
+  if (!codes.length) return '';
+  const label = (c) => {
+    const hit = pos.find((p) => p.code === c) || trd.find((t) => t.code === c);
+    return `${hit && hit.name ? hit.name + ' ' : ''}${c}`;
+  };
+  const code = codes.includes(S.simKlineCode) ? S.simKlineCode : codes[0];
+  S.simKline = S.simKline || {};
+  const kd = S.simKline[code];
+  let body;
+  if (!kd) { ensureSimKline(code); body = `<div class="empty">加载K线…</div>`; }
+  else if (!(kd.candles || []).length) body = `<div class="empty">${esc(kd.source_error || '无K线数据。')}</div>`;
+  else body = simCandle(kd);
+  return `
+  <h2 class="sec">K线与买卖点</h2>
+  <div class="card" style="padding:12px 14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+      <select data-act="sim-kline" style="min-width:190px">${codes.map((c) => `<option value="${esc(c)}"${c === code ? ' selected' : ''}>${esc(label(c))}</option>`).join('')}</select>
+      <span class="muted" style="font-size:12px">${kd && kd.name ? esc(kd.name) + ' · ' : ''}日K · 近 ${Math.min((kd && kd.candles || []).length || 120, 120)} 个交易日</span>
+    </div>
+    ${body}
+  </div>`;
+}
+
+function simCandle(kd) {
+  const cs = (kd.candles || []).slice(-120);
+  if (!cs.length) return `<div class="empty">无K线数据。</div>`;
+  const marks = kd.marks || [];
+  const W = 920, H = 340, PL = 50, PR = 12, PT = 16, PB = 24;
+  const n = cs.length, step = (W - PL - PR) / n;
+  let lo = Math.min(...cs.map((c) => c.low)), hi = Math.max(...cs.map((c) => c.high));
+  const span0 = (hi - lo) || 1; lo -= span0 * 0.08; hi += span0 * 0.08;
+  const span = hi - lo;
+  const X = (i) => PL + i * step + step / 2;
+  const Y = (p) => PT + (hi - p) / span * (H - PT - PB);
+  const idx = {}; cs.forEach((c, i) => { idx[c.date] = i; });
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const p = hi - span * f, y = Y(p);
+    return `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W - PR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>` +
+      `<text x="${PL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--ink-3)">${p.toFixed(2)}</text>`;
+  }).join('');
+  const bw = Math.max(2, step * 0.62);
+  const candles = cs.map((c, i) => {
+    const up = c.close >= c.open, col = up ? 'var(--up)' : 'var(--down)';
+    const yO = Y(c.open), yC = Y(c.close);
+    const top = Math.min(yO, yC), hgt = Math.max(1.2, Math.abs(yO - yC));
+    return `<line x1="${X(i).toFixed(1)}" y1="${Y(c.high).toFixed(1)}" x2="${X(i).toFixed(1)}" y2="${Y(c.low).toFixed(1)}" stroke="${col}" stroke-width="1"/>` +
+      `<rect x="${(X(i) - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" fill="${col}">` +
+      `<title>${esc(c.date)} 开${c.open} 收${c.close} 高${c.high} 低${c.low}</title></rect>`;
+  }).join('');
+  // 买卖点标记：圆环+三角锚定成交价位（横向虚线=该价位），旁注常显「日期 方向 成交价」
+  const mks = marks.map((m) => {
+    const i = idx[m.date]; if (i == null) return null;
+    const buy = m.direction === 'buy';
+    const p = m.price != null ? m.price : (buy ? cs[i].low : cs[i].high);
+    const yp = Y(p);
+    return { m, buy, x: X(i), yp, cy: yp + (buy ? 11 : -11) };
+  }).filter(Boolean);
+  // 相邻日/同价位的标记（如次日止损卖）圆环会糊成一团：按 y 排序后两两推开，保证环间留白
+  mks.sort((a, b) => a.cy - b.cy);
+  for (let a = 0; a < mks.length; a++)
+    for (let b = a + 1; b < mks.length; b++) {
+      const A = mks[a], B = mks[b];
+      if (Math.abs(A.x - B.x) < 26 && Math.abs(A.cy - B.cy) < 26) {
+        const mid = (A.cy + B.cy) / 2;
+        A.cy = mid - 14; B.cy = mid + 14;
+      }
+    }
+  const mk = mks.map((d) => {
+    const { m, buy, x, yp } = d;
+    const cy = Math.min(Math.max(d.cy, PT + 10), H - PB - 10);
+    const col = buy ? 'var(--up)' : 'var(--down)';
+    const tri = buy
+      ? `${x.toFixed(1)},${(cy - 5).toFixed(1)} ${(x - 4.5).toFixed(1)},${(cy + 3.5).toFixed(1)} ${(x + 4.5).toFixed(1)},${(cy + 3.5).toFixed(1)}`
+      : `${x.toFixed(1)},${(cy + 5).toFixed(1)} ${(x - 4.5).toFixed(1)},${(cy - 3.5).toFixed(1)} ${(x + 4.5).toFixed(1)},${(cy - 3.5).toFixed(1)}`;
+    const lx = Math.max(x - 13, PL + 64);
+    const ly = Math.min(Math.max(cy + 3.5, PT + 10), H - PB - 2);
+    const lbl = `${m.date.slice(5)} ${buy ? '买' : '卖'} ${m.price}`;
+    const tipTxt = `${esc(m.date)} ${esc(m.cn)} ${buy ? '买入' : '卖出'} ${m.quantity}股 @ ${m.price} ${esc(m.reason || '')}`;
+    return `<line x1="${PL}" y1="${yp.toFixed(1)}" x2="${W - PR}" y2="${yp.toFixed(1)}" stroke="${col}" stroke-width="1" stroke-dasharray="3 4" opacity="0.45"><title>${tipTxt}</title></line>` +
+      `<circle cx="${x.toFixed(1)}" cy="${cy.toFixed(1)}" r="8.5" fill="var(--panel)" fill-opacity="0.85" stroke="${col}" stroke-width="2"><title>${tipTxt}</title></circle>` +
+      `<polygon points="${tri}" fill="${col}"><title>${tipTxt}</title></polygon>` +
+      `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="end" font-size="10.5" font-weight="700" fill="${col}" stroke="var(--panel)" stroke-width="3" paint-order="stroke"><title>${tipTxt}</title>${esc(lbl)}</text>`;
+  }).join('');
+  const xl = [0, Math.floor(n / 2), n - 1].map((i, k) =>
+    `<text x="${X(i).toFixed(1)}" y="${H - 6}" text-anchor="${k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}" font-size="10" fill="var(--ink-3)">${esc(cs[i].date)}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${grid}${candles}${mk}${xl}</svg>
+  <div class="muted" style="font-size:11.5px;margin-top:6px">图例：<span style="color:var(--up)">▲ 买入</span> / <span style="color:var(--down)">▼ 卖出</span> · 圆环+三角锚定成交价位（横向虚线=该价位，相邻标记自动错开），旁注「日期 方向 成交价」· 悬停看策略/股数/原因 · 红涨绿跌 · 前复权日K</div>`;
 }
 
 function simKpi(label, value, colorCls) {
@@ -1004,6 +1279,9 @@ document.addEventListener('click', async (e) => {
   if (!el) return;
   const act = el.dataset.act;
 
+  if (act === 'pulse-board') { S.pulseBoard = el.dataset.v; render(); return; }
+  if (act === 'pulse-refresh') { S.pulse = null; loadPulse(true).then(() => render()); return; }
+
   if (act === 'plan-filter') { S.planOnly = el.dataset.v === 'ready'; render(); return; }
   if (act === 'alert-level') { S.alertLevel = el.dataset.v; render(); return; }
   if (act === 'hist-sel') { S.histSel = el.dataset.v; render(); return; }
@@ -1077,7 +1355,7 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (act === 'sim-refresh') {
-    S.simOverview = null; S.simDetail = null; S.simCompare = null;
+    S.simOverview = null; S.simDetail = null; S.simCompare = null; S.simKline = null;
     ensureSim(true);
     toast('正在刷新模拟交易数据…');
     return;
@@ -1086,6 +1364,8 @@ document.addEventListener('click', async (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'alert-date') { S.alertDate = e.target.value; render(); }
+  const ksel = e.target.closest('[data-act="sim-kline"]');
+  if (ksel) { S.simKlineCode = ksel.value; ensureSimKline(ksel.value); render(); return; }
   if (e.target.id === 'screen-date') {
     const day = e.target.value;
     S.screening = null; S.screeningLoading = true; S.screeningErr = null;
@@ -1220,7 +1500,12 @@ function tickClock() {
 }
 
 function routeFromHash() {
-  const v = (location.hash || '#/dashboard').replace('#/', '');
+  const raw = (location.hash || '#/dashboard').replace('#/', '');
+  const [v, qs] = raw.split('?');
+  if (qs) {
+    const k = new URLSearchParams(qs).get('kline');
+    if (k) S.simKlineCode = k;   // 深链：#/simulation?kline=000591 直接打开该标的的K线与买卖点
+  }
   setView(v || 'dashboard');
 }
 
@@ -1231,6 +1516,16 @@ $('#btn-reload').addEventListener('click', async () => { await load(); toast('�
 (async () => {
   tickClock();
   setInterval(tickClock, 1000);
+  // 行情脉搏 / 活动流自动刷新：脉搏页 60s 拉一次（上游缓存也是 60s），仪表盘 30s 拉一次活动流
+  setInterval(() => {
+    if (S.view === 'pulse') {
+      loadPulse(true).then(() => { if (S.view === 'pulse') render(); });
+      loadActivity(40).then(() => { if (S.view === 'pulse') render(); });
+    } else if (S.view === 'dashboard') {
+      ensureActivity();
+      loadPulse().then(() => { if (S.view === 'dashboard') render(); });
+    }
+  }, 30000);
   routeFromHash();
   try {
     await load();

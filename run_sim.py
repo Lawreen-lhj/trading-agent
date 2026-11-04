@@ -58,6 +58,13 @@ log = logging.getLogger("sim")
 CONFIG_PATH = ROOT / "config.yaml"
 SIM_DB = ROOT / "data" / "simulation.db"
 
+# K线日线当日缓存：扩池后候选变多，同一进程同一天内同一 code 只抓一次日线，
+# 避免开盘轮+两次补扫重复请求把腾讯/东财日线源打到限流（HTTP 501）。
+_KLINE_DAY_CACHE: dict = {}          # (date, code) -> bars | None
+_KLINE_FETCH_DATE: str = ""          # 缓存所属日期
+KLINE_DAILY_BUDGET = 45              # 单进程单日日线抓取上限，超出则 graceful 跳过增强
+_kline_fetch_count = 0
+
 # 四个策略账户（account_id 即策略名）
 STRATEGY_IDS = ["board_hit", "trend_pullback", "oversold_bounce", "event_driven"]
 
@@ -246,6 +253,32 @@ def fetch_events(codes: list[str]) -> list[Event]:
 # 构建策略输入
 # ═══════════════════════════════════════════════════════════════════════
 
+def _daily_bars(code: str, days: int = 120):
+    """取日线（当日缓存 + 单日预算）。失败/超预算返回 None，调用方 graceful 降级。"""
+    global _KLINE_FETCH_DATE, _kline_fetch_count
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _KLINE_FETCH_DATE != today:
+        _KLINE_FETCH_DATE = today
+        _KLINE_DAY_CACHE.clear()
+        _kline_fetch_count = 0
+    key = (today, code)
+    if key in _KLINE_DAY_CACHE:
+        return _KLINE_DAY_CACHE[key]
+    if _kline_fetch_count >= KLINE_DAILY_BUDGET:
+        return None
+    bars = None
+    try:
+        bars, _src = ds.daily(code, days=days)
+        if not bars:
+            bars = tx.kline(code, days=days)
+    except Exception as exc:  # noqa: BLE001
+        log.info("%s 日线获取失败：%s", code, str(exc)[:60])
+        bars = None
+    _kline_fetch_count += 1
+    _KLINE_DAY_CACHE[key] = bars
+    return bars
+
+
 def build_stocks(watchlist: list[dict], quotes: dict, pool: dict,
                  kline_ok: bool) -> tuple[list[dict], dict[str, dict]]:
     """把自选池 + 报价 + 涨停池合并成策略 scan 需要的 stocks 列表。
@@ -299,17 +332,18 @@ def build_stocks(watchlist: list[dict], quotes: dict, pool: dict,
         }
 
         # K线指标增强（仅在日线源可用时；trend_pullback/oversold_bounce 依赖这些字段）
+        # 走 _daily_bars：当日缓存 + 单日预算，扩池后不会重复/超量请求日线源。
         if kline_ok:
             try:
-                bars, _src = ds.daily(code, days=120)
-                if not bars:
-                    bars = tx.kline(code, days=120)
+                before = _kline_fetch_count
+                bars = _daily_bars(code, days=120)
                 if bars and len(bars) >= 30:
                     snap = indicators.snapshot(indicators.compute(bars, code=code))
                     for k, v in snap.items():
                         if v is not None and k not in s:
                             s[k] = v
-                time.sleep(0.4)
+                if _kline_fetch_count > before:
+                    time.sleep(0.4)
             except Exception as exc:  # noqa: BLE001
                 log.info("%s 指标增强失败：%s", code, str(exc)[:60])
 

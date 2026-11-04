@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from src import configstore  # noqa: E402
+from src import pulse  # noqa: E402
 from src.simulation.account import Account  # noqa: E402
 from src.simulation.matcher import (  # noqa: E402
     Matcher, RiskManager, market_session, calc_limit_prices,
@@ -61,6 +62,59 @@ log = logging.getLogger("sim_live")
 
 CONFIG_PATH = ROOT / "config.yaml"
 STATE_PATH = ROOT / "data" / "sim_live_state.json"
+MARKET_DB = ROOT / "data" / "market.db"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 系统活动流：把"每轮在干什么"落 market.db activity_log，WebUI 实时展示
+# ═══════════════════════════════════════════════════════════════════════
+
+_act_store = None
+
+
+def _activity_store():
+    global _act_store
+    if _act_store is None:
+        from src.db import Store  # 延迟导入，避免启动期重依赖
+        _act_store = Store(MARKET_DB)
+    return _act_store
+
+
+def log_activity(kind: str, message: str, strategy: str = None, detail: dict = None):
+    """写一条系统活动。失败只记 debug，绝不影响交易主循环。"""
+    try:
+        now = datetime.now()
+        _activity_store().log_activity(
+            now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"),
+            kind, message, strategy, detail,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("activity 落库失败：%s", exc)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 候选池：自选池 ∪ 当日主力净流入 TopN（治"只扫自选池常年无候选"）
+# ═══════════════════════════════════════════════════════════════════════
+
+def build_universe(cfg: dict) -> tuple[list[dict], list[str], int]:
+    """返回 (扩展自选池, codes, 资金流新增数)。
+
+    资金流源失败 / topn=0 时新增 0，回退为纯自选池，行为与扩池前一致。
+    """
+    base = cfg.get("watchlist", []) or []
+    seen = {str(w.get("code", "")).zfill(6) for w in base}
+    topn = int((cfg.get("simulation", {}) or {}).get("flow_pool_topn", 15) or 0)
+    extended = list(base)
+    added = 0
+    if topn > 0:
+        for r in pulse.stock_flow_pool(topn):
+            c = str(r.get("code", "")).zfill(6)
+            if c and c not in seen:
+                extended.append({"code": c, "name": r.get("name", ""), "tag": "资金流"})
+                seen.add(c)
+                added += 1
+    codes = [str(w.get("code", "")).zfill(6) for w in extended]
+    return extended, codes, added
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -90,12 +144,22 @@ def read_state() -> dict:
 # 每个策略账户最近一轮建仓轮的结论（空仓原因/建仓笔数），随心跳落盘供 WebUI 对比视图展示
 LAST_PER_NOTE: dict = {}
 
+# 盘中补扫时点（只给空仓/低仓位策略补建仓）与"低仓位"阈值
+RESCAN_TIMES = (dtime(10, 30), dtime(13, 30))
+IDLE_RATIO = 0.5
+# 补扫截止时间：过此点不再补开新仓（避免盘中重启把错过时点的补扫堆到尾盘竞价）
+RESCAN_CUTOFF = dtime(14, 30)
+
 
 def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
-             kline_ok: bool, events: list) -> dict:
-    """用实时价扫描并为每个策略账户建仓。返回活动日志字典。"""
-    watchlist = cfg.get("watchlist", []) or []
-    codes = [str(w.get("code", "")).zfill(6) for w in watchlist]
+             kline_ok: bool, events: list, only_idle: bool = False) -> dict:
+    """用实时价扫描并为每个策略账户建仓。返回活动日志字典。
+
+    only_idle=True 时只为空仓/低仓位（仓位比 < IDLE_RATIO）的策略补建仓，
+    供盘中补扫使用；开盘轮传 False 全量评估。
+    """
+    extended, codes, pool_added = build_universe(cfg)
+    n_base = len(cfg.get("watchlist", []) or [])
     # 已持仓的代码也要取实时价（供后续卖出评估）
     held = {c for a in accounts.values() for c in a.positions}
     all_codes = list(dict.fromkeys(codes + list(held)))
@@ -104,7 +168,7 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
     pool = fetch_board_pool()
     sentiment = compute_sentiment()
     market = {"sentiment": sentiment}
-    stocks, market_data = build_stocks(watchlist, quotes, pool, kline_ok)
+    stocks, market_data = build_stocks(extended, quotes, pool, kline_ok)
 
     phase = sentiment.get("phase", "中性")
     activity = {
@@ -113,9 +177,14 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
         "score": sentiment.get("score"),
         "notes": [], "buys": [], "quotes_codes": len(quotes),
         "per_note": {},
+        "pool": {"base": n_base, "added": pool_added, "stocks": len(stocks)},
     }
     for d in sentiment.get("_degraded", []):
         activity["notes"].append(f"数据降级：{d}")
+    activity["notes"].append(
+        f"候选池 {len(stocks)} 只（自选 {n_base} + 资金流 {pool_added}）")
+    log_activity("scan", f"扫描候选池 {len(stocks)} 只（自选 {n_base} + 资金流 {pool_added}），情绪{phase}",
+                 detail=activity["pool"])
 
     if not stocks:
         activity["notes"].append("未取到自选池实时报价，本轮不建仓")
@@ -128,6 +197,8 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
 
     for name in STRATEGY_IDS:
         account = accounts[name]
+        if only_idle and (account.get_summary().get("position_ratio") or 0) >= IDLE_RATIO:
+            continue
         strategy = get_strategy(name, _strat_cfg(cfg, name, capital))
         if strategy is None:
             activity["notes"].append(f"{STRATEGY_CN[name]}：策略未注册")
@@ -137,11 +208,13 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
             activity["notes"].append(
                 f"{STRATEGY_CN[name]}：空仓·相位不适配（当前「{phase}」，适合 {strategy.suitable_phases}）")
             activity["per_note"][name] = f"空仓·相位不适配（当前「{phase}」）"
+            log_activity("skip", f"相位不适配（当前「{phase}」，适合 {strategy.suitable_phases}）", name)
             continue
         if name in KLINE_DEPENDENT and not kline_ok:
             activity["notes"].append(
                 f"{STRATEGY_CN[name]}：空仓·K线指标源被限流，无法计算 {'/'.join(KLINE_DEPENDENT[name])}")
             activity["per_note"][name] = f"空仓·K线源限流，无法算 {'/'.join(KLINE_DEPENDENT[name])}"
+            log_activity("skip", f"K线源限流，无法算 {'/'.join(KLINE_DEPENDENT[name])}", name)
             continue
         if name == "event_driven":
             if events:
@@ -149,6 +222,7 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
             else:
                 activity["notes"].append(f"{STRATEGY_CN[name]}：空仓·自选池内无 48h 新鲜利好事件")
                 activity["per_note"][name] = "空仓·自选池内无 48h 新鲜利好"
+                log_activity("skip", "候选池内无 48h 新鲜利好事件", name)
                 continue
 
         try:
@@ -156,11 +230,13 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
         except Exception as exc:  # noqa: BLE001
             activity["notes"].append(f"{STRATEGY_CN[name]}：scan 异常 {type(exc).__name__} {str(exc)[:60]}")
             activity["per_note"][name] = f"空仓·scan 异常 {type(exc).__name__}"
+            log_activity("skip", f"scan 异常 {type(exc).__name__}", name)
             continue
 
         if not signals:
             activity["notes"].append(f"{STRATEGY_CN[name]}：空仓·未选出符合条件标的")
             activity["per_note"][name] = "空仓·未选出符合条件标的"
+            log_activity("skip", f"扫描 {len(stocks)} 只未选出符合条件标的", name)
             continue
 
         matcher = Matcher(account, strict_time_check=False)
@@ -192,6 +268,10 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
                 "account": name, "code": f.get("code"), "name": f.get("name"),
                 "price": f.get("price"), "quantity": f.get("quantity"),
             })
+            log_activity("buy",
+                         f"买入 {f.get('name')} {f.get('quantity')}股 @ {f.get('price')}",
+                         name, {"code": f.get("code"), "price": f.get("price"),
+                                "quantity": f.get("quantity")})
         for o in matcher.order_history:
             if o.status.value in ("rejected", "expired") and o.side.value == "buy":
                 activity["notes"].append(
@@ -199,6 +279,7 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
         if submitted and not fills:
             activity["notes"].append(f"{STRATEGY_CN[name]}：{submitted} 笔挂单均未成交（价格未触达/涨停封死）")
             activity["per_note"][name] = f"空仓·{submitted} 笔挂单未成交"
+            log_activity("skip", f"{submitted} 笔挂单均未成交（价格未触达/涨停封死）", name)
         elif fills:
             activity["per_note"][name] = f"建仓 {len(fills)} 笔"
 
@@ -210,6 +291,19 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
 
     LAST_PER_NOTE.update(activity["per_note"])
     return activity
+
+
+def rescan_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
+                codes: list) -> dict:
+    """盘中补扫：重新探测日线源/事件源，只给空仓/低仓位策略补建仓。"""
+    kline_ok = probe_kline(codes[0])
+    events = []
+    try:
+        events = [e for e in fetch_events(codes)
+                  if (datetime.now() - e.publish_time).total_seconds() / 3600 <= 48]
+    except Exception as exc:  # noqa: BLE001
+        log.info("补扫事件采集失败：%s", exc)
+    return buy_pass(accounts, risks, cfg, capital, kline_ok, events, only_idle=True)
 
 
 def _strat_cfg(cfg: dict, name: str, capital: float) -> dict:
@@ -317,6 +411,32 @@ def finalize(accounts: dict, quotes: dict):
         account.save()
 
 
+def _refresh_brief_after_close() -> None:
+    """收盘收尾时自动重跑一次日报简报。
+
+    Web 仪表盘的指数/计划/温度都读每日简报 JSON；若不刷新，第二天打开仍是
+    前一交易日的快照（用户反馈"为什么还是昨天的数据"的根因）。这里在收盘
+    finalize 后自动跑 run_brief，让仪表盘日期与次日计划每日自动滚动。
+    静默刷新（notify_enabled=False），不与手动/Web 跑简报的通知叠加。
+    盘中（<15:00）手动 --once 不触发，避免用盘中快照覆盖前一日计划。
+    """
+    if datetime.now().time() < dtime(15, 0):
+        return
+    try:
+        import run_brief  # 延迟导入：启动期不需要
+        res = run_brief.run_once(CONFIG_PATH, notify_enabled=False, quiet=True)
+        log.info("收盘自动刷新日报简报：%s · %s 只 · %s 个可执行计划",
+                 res.get("date"), res.get("watch_count"), res.get("plans_ready"))
+        log_activity("info",
+                     f"收盘自动刷新日报简报：{res.get('date')} · {res.get('watch_count')} 只 · "
+                     f"{res.get('plans_ready')} 个可执行计划",
+                     strategy="system")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("收盘自动刷新简报失败：%s", exc)
+        log_activity("warn", f"收盘自动刷新简报失败：{type(exc).__name__}: {exc}",
+                     strategy="system")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 主循环
 # ═══════════════════════════════════════════════════════════════════════
@@ -328,11 +448,11 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     fee_cfg = sim_cfg.get("fees", {})
     risk_cfg = sim_cfg.get("risk", {})
 
-    watchlist = cfg.get("watchlist", []) or []
-    if not watchlist:
+    base_watch = cfg.get("watchlist", []) or []
+    if not base_watch:
         print("自选池为空，请先用 run_screen.py --write 或手动填充 config.yaml watchlist。")
         return 1
-    codes = [str(w.get("code", "")).zfill(6) for w in watchlist]
+    extended, codes, pool_added = build_universe(cfg)
 
     # 载入四个策略账户（沿用已有持仓/现金；不存在则新建）
     accounts = {
@@ -352,19 +472,27 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     print(f"盘中自动循环模拟交易启动 · {today}")
     print(f"  账户：{', '.join(STRATEGY_CN[n] + '(' + n + ')' for n in STRATEGY_IDS)}")
     print(f"  各账户本金 {capital:,.0f}，当前合计持仓 {held} 只（含昨日结转）")
+    print(f"  候选池 {len(codes)} 只（自选 {len(base_watch)} + 资金流 {pool_added}）")
     print(f"  轮询间隔 {interval} 秒")
+    log_activity("start",
+                 f"盘中自动循环启动 · 候选池 {len(codes)} 只（自选 {len(base_watch)} + 资金流 {pool_added}）· 结转持仓 {held} 只",
+                 detail={"codes": len(codes), "base": len(base_watch),
+                         "flow_added": pool_added, "held": held})
 
     kline_ok = probe_kline(codes[0])
     if not kline_ok:
         print("  ⚠ 日线源被限流：trend_pullback / oversold_bounce 本轮无法评估")
+        log_activity("warn", "日线源被限流：trend_pullback / oversold_bounce 本轮无法评估")
 
     events = []
     try:
         events = [e for e in fetch_events(codes)
                   if (datetime.now() - e.publish_time).total_seconds() / 3600 <= 48]
-        print(f"  自选池 48h 新鲜利好事件：{len(events)} 条")
+        print(f"  候选池 48h 新鲜利好事件：{len(events)} 条")
+        log_activity("info", f"候选池 48h 新鲜利好事件 {len(events)} 条")
     except Exception as exc:  # noqa: BLE001
         log.info("事件采集失败：%s", exc)
+        log_activity("warn", f"事件采集失败 {type(exc).__name__}")
 
     running = {"flag": True}
 
@@ -380,6 +508,18 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
 
     bought_today = False
     snapshot_done = False
+    # 同日重启时从心跳恢复进度，避免重跑开盘建仓轮/重复写快照
+    try:
+        _st = read_state() or {}
+        if str(_st.get("updated_at", ""))[:10] == today:
+            bought_today = bool(_st.get("bought_today"))
+            snapshot_done = bool(_st.get("snapshot_done"))
+            if bought_today or snapshot_done:
+                log.info("恢复当日心跳进度：bought_today=%s snapshot_done=%s",
+                         bought_today, snapshot_done)
+    except Exception:  # noqa: BLE001
+        pass
+    done_slots: set = set()
 
     def _finalize_once():
         nonlocal snapshot_done
@@ -389,6 +529,8 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
         finalize(accounts, q)
         snapshot_done = True
         log.info("已写当日快照")
+        log_activity("snapshot", "已写当日净值快照（收盘收尾）")
+        _refresh_brief_after_close()
 
     while running["flag"]:
         now = datetime.now()
@@ -440,6 +582,23 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
             bought_today = True
             _report_buy(act)
 
+        # 盘中补扫（10:30 / 13:30 各一次，只给空仓/低仓位策略补建仓）
+        # 过 RESCAN_CUTOFF 后不再补开新仓：把错过的时点直接标记完成，避免盘中重启
+        # 把补扫堆到尾盘竞价才建仓。
+        for slot in RESCAN_TIMES:
+            if slot in done_slots:
+                continue
+            if now.time() >= RESCAN_CUTOFF:
+                done_slots.add(slot)
+                log_activity("info", f"已过 14:30 补扫截止，跳过 {slot.strftime('%H:%M')} 补扫")
+                continue
+            if now.time() >= slot:
+                done_slots.add(slot)
+                log.info("盘中补扫（%s）…", slot.strftime("%H:%M"))
+                log_activity("rescan", f"盘中补扫（{slot.strftime('%H:%M')}）：重探日线/事件源，为空闲策略补建仓")
+                act = rescan_pass(accounts, risks, cfg, capital, codes)
+                _report_buy(act)
+
         # 盘中卖出评估
         held_codes = {c for a in accounts.values() for c in a.positions}
         q = fetch_quotes(list(held_codes | set(codes)))
@@ -489,6 +648,10 @@ def _report_sell(sells: list):
         pnl_s = f" 盈亏 {pnl:+,.2f}" if isinstance(pnl, (int, float)) else ""
         print(f"  ✗ 卖出 [{STRATEGY_CN.get(s['account'])}] {s['code']} {s['name']} "
               f"{s['quantity']} 股 @ {s['price']}{pnl_s} —— {s['reason']}")
+        log_activity("sell",
+                     f"卖出 {s['name']} {s['quantity']}股 @ {s['price']}{pnl_s} —— {s['reason']}",
+                     s.get("account"), {"code": s.get("code"), "price": s.get("price"),
+                                        "quantity": s.get("quantity"), "reason": s.get("reason")})
 
 
 def _write_heartbeat(accounts: dict, sess: dict, bought: bool, snapped: bool, running: bool):

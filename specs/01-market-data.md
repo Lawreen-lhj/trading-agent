@@ -65,9 +65,17 @@
 
 主源同花顺 hsgtApi（不封 IP），备源东财 kamt。输出 `{hgt,sgt,total,asof,source}`。另有 `north_flow_history(days)` 取历史。
 
-### 板块资金流 `sector_fund_flow(board_type,period,top_n)`
+### 板块资金流 `sector_fund_flow(board_type,period,top_n,max_age_h)`
 
-东财 push2 clist 带资金流字段。走 push2 域名，限流时降级返回空（不阻塞主流程）。
+东财 push2 clist 带资金流字段。走 push2 域名，限流时降级返回空（不阻塞主流程）。`max_age_h` 控制进程内缓存可接受的新鲜度（脉搏页传 1/60 即 1 分钟）。
+
+### 个股主力资金榜 `stock_fund_flow(top_n,direction,max_age_h)`
+
+东财 push2 clist（fid=f62 主力净额，fs 覆盖沪深京 A 股），`direction="in"` po=1 降序取净流入榜、`"out"` po=0 取净流出榜。输出每只 `{code,name,price,pct_chg,net_flow,super_large,large,medium,small,net_ratio}`。失败/限流返回 None 并 log.warning，不抛。
+
+### 行情脉搏采集器 `src/pulse.py`
+
+WebUI 脉搏页与 idle 策略候选池共用的按需采集层：`collect(store,force)` 聚合 板块主力榜(行业+概念) + 个股主力双榜 + 北向 + 涨停炸板计数 + **A 股指数实时行情**（`datasource.index_quotes()`），**60s 进程内缓存**（上游每源 ≤1 次/分钟，避开东财限流），部分失败降级进 `errors`；每次采集落一行 `pulse_snapshots`（北向净额/涨停/炸板/跌停/领涨板块）供日内趋势 sparkline。`stock_flow_pool(top_n)` 把个股净流入榜转成策略候选池条目（code/name/pct_chg/net_flow/net_ratio），失败返回 []。
 
 ### 事件数据（东财 datacenter-web）
 

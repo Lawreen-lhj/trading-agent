@@ -247,6 +247,8 @@ td.name .code { font-size: 10.5px; color: var(--ink-3); letter-spacing: .3px; }
 .pill.ok { background: var(--down-bg); color: var(--down); }
 .pill.gray { background: #F0EEE7; color: var(--ink-3); }
 .pill.hold { background: #EAF0F6; color: #2A5C8A; }
+.pill.blue { background: #E8F0FB; color: #1F62B0; }
+.pill.bad { background: var(--up-bg); color: var(--up); font-weight: 600; }
 
 /* 模拟交易：四策略账户切换标签 */
 .simtabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 14px; }

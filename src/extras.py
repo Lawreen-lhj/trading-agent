@@ -438,12 +438,13 @@ _PERIOD_FIELDS = {
 
 
 def sector_fund_flow(board_type: str = "industry", period: str = "today",
-                     top_n: int = 10) -> list[dict] | None:
+                     top_n: int = 10, max_age_h: float = 0.5) -> list[dict] | None:
     """板块资金流向。
 
     board_type: "industry"(行业) / "concept"(概念) / "region"(地域)
     period: "today" / "5d" / "10d"
     top_n: 返回前 N 个（按主力净流入降序）
+    max_age_h: 缓存有效期（小时）。默认 0.5；盘中实时脉搏页传更小值（如 1/60）。
 
     返回：[{"name": 板块名, "pct_chg": 涨跌幅, "net_flow": 主力净流入(元),
             "net_pct": 净占比(%), "lead_stock": 领涨股}, ...]
@@ -453,7 +454,7 @@ def sector_fund_flow(board_type: str = "industry", period: str = "today",
     if period not in _PERIOD_FIELDS:
         return None
 
-    cached = _cache_get(f"sector_flow_{board_type}_{period}", max_age_h=0.5)
+    cached = _cache_get(f"sector_flow_{board_type}_{period}", max_age_h=max_age_h)
     if cached:
         return cached[:top_n]
 
@@ -490,6 +491,62 @@ def sector_fund_flow(board_type: str = "industry", period: str = "today",
         return result
     except (FetchError, KeyError, TypeError) as exc:
         log.warning("板块资金流获取失败: %s", exc)
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# §3.4b 个股主力资金流排名（东财 push2 clist，fid=f62）
+# ═══════════════════════════════════════════════════════════════════════
+
+# 沪深A股（沪主板/深主板/创业板/科创板）
+_STOCK_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+
+
+def stock_fund_flow(top_n: int = 20, direction: str = "in",
+                    max_age_h: float = 1 / 60) -> list[dict] | None:
+    """个股主力净流入/净流出排名（当日累计）。
+
+    direction: "in"=主力净流入降序 / "out"=主力净流出升序（即流出榜）
+    max_age_h: 缓存有效期（小时），默认 1 分钟。
+
+    返回：[{"code","name","price","pct_chg","net_flow"(主力净流入元),
+            "super_large"(超大单净), "large"(大单净), "medium"(中单净),
+            "small"(小单净), "net_ratio"(主力净占比%)}...]；失败返回 None。
+    """
+    cached = _cache_get(f"stock_flow_{direction}", max_age_h=max_age_h)
+    if cached:
+        return cached[:top_n]
+    try:
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": "1", "pz": str(max(top_n, 1)),
+            "po": "1" if direction == "in" else "0",
+            "np": "1", "fltt": "2", "invt": "2",
+            "fid": "f62",           # 主力净流入
+            "fs": _STOCK_FS,
+            "fields": "f12,f14,f2,f3,f62,f66,f72,f78,f84,f184",
+        }
+        d = em_get_json(url, params=params)
+        items = ((d.get("data") or {}).get("diff") or [])
+        result = []
+        for it in items:
+            result.append({
+                "code": str(it.get("f12", "")).zfill(6),
+                "name": it.get("f14", ""),
+                "price": _num(it.get("f2")),
+                "pct_chg": _num(it.get("f3")),
+                "net_flow": _num(it.get("f62")),
+                "super_large": _num(it.get("f66")),
+                "large": _num(it.get("f72")),
+                "medium": _num(it.get("f78")),
+                "small": _num(it.get("f84")),
+                "net_ratio": _num(it.get("f184")),
+            })
+        if result:
+            _cache_set(f"stock_flow_{direction}", result)
+        return result
+    except (FetchError, KeyError, TypeError) as exc:
+        log.warning("个股资金流获取失败: %s", exc)
         return None
 
 

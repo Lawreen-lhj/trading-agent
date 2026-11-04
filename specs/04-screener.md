@@ -10,7 +10,8 @@
 ## 触发方式
 
 - 配置开关：`screener.enabled`(true)、`screener.top_n`(30)。
-- **独立入口（已打通）**：`run_screen.py` 是选股引擎的专用运行器，采用**两段漏斗**规避逐只取日线的限流：第一段用轻量全市场快照做硬过滤 + 启发式预排序，收窄到 `--top`（默认30）只；第二段只为这批候选取日线算完整指标，再交 `screen_stocks()` 打分、`shortterm.plan()` 出计划。支持 `--write`（经 configstore 备份后合并/替换回写 config.yaml watchlist）、`--save`（落 `screening_results` 表）。
+- **独立入口（已打通）**：`run_screen.py` 是选股引擎的专用运行器，采用**两段漏斗**规避逐只取日线的限流：第一段用轻量全市场快照做硬过滤 + 启发式预排序，收窄到 `--top`（默认30）只；第二段前把**涨停池头部（连板+封单 Top10）注入扫描域**（第一段预排序防追高、结构性排除 >9% 的票，而打板策略的原生域恰是今日涨停/连板票；字段映射与 `run_sim.build_stocks` 同口径）；第二段只为扫描域取日线算完整指标，再交 `screen_stocks()` 打分、`shortterm.plan()` 出计划。支持 `--write`（经 configstore 备份后合并/替换回写 config.yaml watchlist）、`--save`（落 `screening_results` 表）、`--no-events`（跳过事件源）。
+- **四策略并行扫描叠加（strategy_overlay）**：第二段富集后、漏斗前，对扫描域并行跑 board_hit/trend_pullback/oversold_bounce/event_driven 的 `scan()`，门控与模拟盘 `run_sim.run_strategy` 同口径（相位适配 → K线依赖限流如实空仓 → event_driven 注入 48h 新鲜利好 → scan），情绪用 `run_sim.compute_sentiment()`（与模拟盘同口径、降级感知）。命中信号挂回候选 `strategy_hits`（强度/买卖区间/止损/目标/盈亏比/股数/原因）并进入 `build_reasons()` 理由行；漏斗淘汰但被策略命中的票以 `via_strategy`（策略直命·未过漏斗）补录进候选；最终候选按「适配策略数 → 短线评分」排序；报告尾附四策略并排段，空仓策略如实给原因（相位不适配/K线源限流/无新鲜事件/无符合条件标的）。
 - **数据源降级**：`build_universe()` 首选东财 push2 全市场快照（`em.market_list`，需 ≥3000 行才可信）；被限流时自动降级到 push2ex **涨停板池 + 炸板池**（短线最强域，保留 limit_days/seal_fund/break_times/industry）。第二段日线东财 push2his 被限流时自动切腾讯备源 `tx.kline`。
 - **与 run_brief 的关系**：`run_brief.py` 已 import `screen_stocks`，但主流程 `build_brief()` 仍未调用它——每日简报的策略扫描标的依旧来自 watchlist。选股走独立的 `run_screen.py`，其输出通过 `--write` 回写 watchlist 间接影响后续简报。将 screener 直接串入 run_brief 流水线仍是一处待打通点。
 
@@ -42,7 +43,7 @@
 - 顶层：`candidates`(已排序)、`stats`(各层计数)、`market_filter`、`patterns_found`({code:[形态名]})、`total_screened`、`final_count`。
 - 每条候选：原始快照全字段 + `screen_score`/`screen_label`/`screen_parts`/`patterns`。
 - `format_screen_result(result)`：输出可读文本（前20只）。
-- **入选理由（run_screen.py）**：`build_reasons(cand)` 把 `screen_parts` 六分项（动量/量价/形态/结构/空间/过热）+ 快照指标证据（RET5/量比/换手倍数/距20日高/均线排列/MA10斜率/布林位置/尾盘分位/ATR%/连板/封单/行业）翻译成逐条带数字的理由；报告逐票打印，并随记录存入 `screening_results.detail_json`。原则：每个判断都给出触发它的数值，不说"形态好"这类无法核对的空话。
+- **入选理由（run_screen.py）**：`build_reasons(cand)` 把 `screen_parts` 六分项（动量/量价/形态/结构/空间/过热）+ 快照指标证据（RET5/量比/换手倍数/距20日高/均线排列/MA10斜率/布林位置/尾盘分位/ATR%/连板/封单/行业）+ **四策略共振行**（适配策略名+强度+买卖区间/止损/目标/盈亏比+策略自身触发原因；`via_strategy` 票附「未过漏斗、仓位自行降档」注）翻译成逐条带数字的理由；报告逐票打印，并随记录存入 `screening_results.detail_json`（WebUI 选股页同步展示）。原则：每个判断都给出触发它的数值，不说"形态好"这类无法核对的空话。
 - 落库：设计落 `screening_results` 表（run_date/code/name/layer1_pass/layer2_pass/layer3_pass/patterns/score/rank/detail_json），经 `Store.save_screening()`。
 
 ## 配置项（config.yaml → screener）
