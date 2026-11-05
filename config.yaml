@@ -172,6 +172,7 @@ simulation:
     min_cash_reserve: 5000
   auto_trade: false
   flow_pool_topn: 15
+  intraday_buy_interval: 300  # 盘中连续买入检查间隔（秒）：交易时段内按此间隔为空仓/低仓位策略用实时价挂单；0=关闭（仅开盘轮+10:30/13:30 补扫）；14:30 后不再开新仓
   # 把最近一次选股结果接入模拟盘候选域：false=不接(默认) / true|passed=只接过漏斗或策略直命 / all=全部候选
   include_screening: false
   screening_max_age_days: 3   # 选股结果超过此天数不接（0=不限）

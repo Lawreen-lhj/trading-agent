@@ -82,11 +82,12 @@ python3 run_sim_live.py -v            # 详细日志
 ```
 定时启动（工作日 9:25 拉起）：`crontab` → `25 9 * * 1-5 cd <项目根> && python3 run_sim_live.py >> data/sim_live.log 2>&1`。
 
-与 `run_sim.py`（一次性建仓）不同，本入口是**常驻盘中循环**，用 `market_session()`（Spec 06）判断时段驱动四阶段：
+与 `run_sim.py`（一次性建仓）不同，本入口是**常驻盘中循环**，用 `market_session()`（Spec 06）判断时段驱动五阶段：
 1. **开盘建仓**（每个交易日一次）：`buy_pass()` 采集情绪/涨停池/事件→`build_stocks`→各策略 `scan()`→`RiskManager.check_buy`→`Matcher.submit_order/match_orders`（打板单封板才成交），落库并更新市值。候选池走 `build_universe(cfg)` = 自选池 ∪ 当日主力净流入 TopN（`pulse.stock_flow_pool`，`simulation.flow_pool_topn` 默认 15、0 关闭；源失败回落纯自选池）∪（可选）最近一次选股结果（`simulation.include_screening`，默认 false；`run_sim.screening_universe(cfg)` 读 `screening_results` 最新一日、按 code 去重打 `tag=选股`，`screening_max_age_days` 防过期、`screening_topn` 限只数），返回 `(extended, codes, flow_added, screen_added)`，治"只扫自选池常年无候选"。
 2. **盘中补扫**（10:30 / 13:30 各一次）：`rescan_pass()` 重新探测日线源与 48h 事件源后调 `buy_pass(only_idle=True)`，仅为空仓/低仓位（仓位比<0.5）的策略补建仓；过 14:30（`RESCAN_CUTOFF`）不再补开新仓。同日重启从心跳恢复 `bought_today`/`snapshot_done`，补扫 `done_slots` 不跨重启保留。
-3. **盘中卖出**（每次轮询）：`sell_pass()` 仅对 `available>0`（T+1 可卖）的持仓，按 `evaluate_exit()` 判定——跌停封死不卖、破止损、封板后跌破成本、达目标①、尾盘时间止损；用 `account.sell(current_price)` 直接成交（不走 Matcher，因其 MARKET 卖单按开盘价成交属盘后口径）。
-4. **尾盘结算**（`closing_auction` 或 ≥14:50 一次）：`take_snapshot` 落每日净值；随后 `_refresh_brief_after_close()` 在 ≥15:00 时**自动静默重跑 `run_brief.run_once(notify_enabled=False)`**，让 Web 仪表盘日期/温度/次日计划每日滚动（否则停留在前一交易日快照）。
+3. **盘中连续买入检查**（默认每 5 分钟）：交易时段内每隔 `simulation.intraday_buy_interval` 秒（默认 300、0=关闭）再为空仓/低仓位（仓位比<0.5）策略调 `buy_pass(only_idle=True)`，用实时价接住盘中才出现的买点（如回踩进买入区间）。进交易时段首轮立即检查（`next_ib=None`），与补扫共用 `RESCAN_CUTOFF`（14:30 后不开新仓，卖出评估不受影响仍每轮进行）；复用开机/补扫探测的 `kline_ok`+48h 事件源不每轮重探；`TODAY_BOUGHT`（`(账户,代码)` 集合，开机从 `sim_trades` 当日买单初始化、成交后追加、跨重启保留）当日去重防追买/反手。
+4. **盘中卖出**（每次轮询）：`sell_pass()` 仅对 `available>0`（T+1 可卖）的持仓，按 `evaluate_exit()` 判定——跌停封死不卖、破止损、封板后跌破成本、达目标①、尾盘时间止损；用 `account.sell(current_price)` 直接成交（不走 Matcher，因其 MARKET 卖单按开盘价成交属盘后口径）。
+5. **尾盘结算**（`closing_auction` 或 ≥14:50 一次）：`take_snapshot` 落每日净值；随后 `_refresh_brief_after_close()` 在 ≥15:00 时**自动静默重跑 `run_brief.run_once(notify_enabled=False)`**，让 Web 仪表盘日期/温度/次日计划每日滚动（否则停留在前一交易日快照）。
 
 **系统活动流**：上述各阶段（scan/skip/buy/sell/rescan/snapshot/start/warn/info）均调 `log_activity()` 写 `market.db activity_log`，server `/api/activity` 与 WebUI 仪表盘/脉搏页实时展示；落库失败仅 debug，不影响交易主循环。扩容池日线抓取走 `run_sim._daily_bars()` 当日缓存 + 每日预算（`KLINE_DAILY_BUDGET=45`），多轮不重复抓、超预算如实降级。
 

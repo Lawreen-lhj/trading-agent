@@ -154,11 +154,19 @@ def read_state() -> dict:
 # 每个策略账户最近一轮建仓轮的结论（空仓原因/建仓笔数），随心跳落盘供 WebUI 对比视图展示
 LAST_PER_NOTE: dict = {}
 
+# 每个账户当日已买入的代码 (account, code)：防止盘中对同一只票反复追买/止损后
+# 反手重买。启动时从 sim_trades 当日成交初始化，成交时实时补充，盘中重启仍生效。
+TODAY_BOUGHT: set = set()
+
 # 盘中补扫时点（只给空仓/低仓位策略补建仓）与"低仓位"阈值
 RESCAN_TIMES = (dtime(10, 30), dtime(13, 30))
 IDLE_RATIO = 0.5
 # 补扫截止时间：过此点不再补开新仓（避免盘中重启把错过时点的补扫堆到尾盘竞价）
 RESCAN_CUTOFF = dtime(14, 30)
+# 盘中连续买入检查的默认间隔（秒），读 simulation.intraday_buy_interval（0=关闭）。
+# 交易时段内按此间隔为空仓/低仓位策略用实时价挂单，避免只靠开盘轮+两次补扫
+# 错过盘中才出现的买点（如回踩进买入区间）；与补扫共用 RESCAN_CUTOFF 截止。
+INTRADAY_BUY_INTERVAL_DEFAULT = 300
 
 
 def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
@@ -257,6 +265,8 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
             shares = int(sig.shares or 0)
             if shares < 100:
                 continue
+            if (name, sig.code) in TODAY_BOUGHT:
+                continue  # 当日已买过这只票：不追买/不反手
             ok, why = risk.check_buy(sig.code, sig.price, shares)
             if not ok:
                 activity["notes"].append(f"{STRATEGY_CN[name]}·{sig.name}：风控拒绝 {why}")
@@ -275,6 +285,7 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
         fills = matcher.match_orders(market_data)
         for f in fills:
             risk.on_trade_executed()
+            TODAY_BOUGHT.add((name, str(f.get("code")).zfill(6)))
             activity["buys"].append({
                 "account": name, "code": f.get("code"), "name": f.get("name"),
                 "price": f.get("price"), "quantity": f.get("quantity"),
@@ -304,16 +315,23 @@ def buy_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
     return activity
 
 
-def rescan_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
-                codes: list) -> dict:
-    """盘中补扫：重新探测日线源/事件源，只给空仓/低仓位策略补建仓。"""
+def refresh_sources(codes: list) -> tuple:
+    """重探日线源/事件源（启动与盘中补扫共用）。返回 (kline_ok, events48h)。"""
     kline_ok = probe_kline(codes[0])
     events = []
     try:
         events = [e for e in fetch_events(codes)
                   if (datetime.now() - e.publish_time).total_seconds() / 3600 <= 48]
     except Exception as exc:  # noqa: BLE001
-        log.info("补扫事件采集失败：%s", exc)
+        log.info("事件采集失败：%s", exc)
+        log_activity("warn", f"事件采集失败 {type(exc).__name__}")
+    return kline_ok, events
+
+
+def rescan_pass(accounts: dict, risks: dict, cfg: dict, capital: float,
+                codes: list) -> dict:
+    """盘中补扫：重新探测日线源/事件源，只给空仓/低仓位策略补建仓。"""
+    kline_ok, events = refresh_sources(codes)
     return buy_pass(accounts, risks, cfg, capital, kline_ok, events, only_idle=True)
 
 
@@ -458,6 +476,7 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     capital = sim_cfg.get("initial_capital", 100000)
     fee_cfg = sim_cfg.get("fees", {})
     risk_cfg = sim_cfg.get("risk", {})
+    ib_interval = int(sim_cfg.get("intraday_buy_interval", INTRADAY_BUY_INTERVAL_DEFAULT))
 
     base_watch = cfg.get("watchlist", []) or []
     if not base_watch:
@@ -480,33 +499,35 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
     for risk in risks.values():
         risk.on_new_day()
 
+    # 当日已买入的代码不再重复买（含盘中重启恢复）
+    for name, account in accounts.items():
+        for t in account.get_trades(500, "buy"):
+            if str(t.get("trade_date")) == today:
+                TODAY_BOUGHT.add((name, str(t.get("code")).zfill(6)))
+
     held = sum(len(a.positions) for a in accounts.values())
     print(f"盘中自动循环模拟交易启动 · {today}")
     print(f"  账户：{', '.join(STRATEGY_CN[n] + '(' + n + ')' for n in STRATEGY_IDS)}")
     print(f"  各账户本金 {capital:,.0f}，当前合计持仓 {held} 只（含昨日结转）")
     print(f"  候选池 {len(codes)} 只（{breakdown}）")
     print(f"  轮询间隔 {interval} 秒")
+    print(f"  盘中连续买入检查：每 {ib_interval} 秒（空仓/低仓位策略，14:30 后不再开新仓）"
+          if ib_interval > 0 else
+          "  盘中连续买入检查：关闭（仅开盘轮 + 10:30/13:30 补扫）")
     log_activity("start",
                  f"盘中自动循环启动 · 候选池 {len(codes)} 只（{breakdown}）· 结转持仓 {held} 只",
                  detail={"codes": len(codes), "base": len(base_watch),
                          "flow_added": pool_added, "screen_added": screen_added, "held": held})
 
-    kline_ok = probe_kline(codes[0])
+    kline_ok, events = refresh_sources(codes)
     if not kline_ok:
         print("  ⚠ 日线源被限流：trend_pullback / oversold_bounce 本轮无法评估")
         log_activity("warn", "日线源被限流：trend_pullback / oversold_bounce 本轮无法评估")
-
-    events = []
-    try:
-        events = [e for e in fetch_events(codes)
-                  if (datetime.now() - e.publish_time).total_seconds() / 3600 <= 48]
-        print(f"  候选池 48h 新鲜利好事件：{len(events)} 条")
-        log_activity("info", f"候选池 48h 新鲜利好事件 {len(events)} 条")
-    except Exception as exc:  # noqa: BLE001
-        log.info("事件采集失败：%s", exc)
-        log_activity("warn", f"事件采集失败 {type(exc).__name__}")
+    print(f"  候选池 48h 新鲜利好事件：{len(events)} 条")
+    log_activity("info", f"候选池 48h 新鲜利好事件 {len(events)} 条")
 
     running = {"flag": True}
+    next_ib = None  # 盘中连续买入检查的下一个时点（进入交易时段后第一轮立即检查）
 
     def handle_signal(signum, frame):
         log.info("收到退出信号，收尾…")
@@ -608,7 +629,17 @@ def run_live(interval: int, duration: int = None, once: bool = False, force: boo
                 done_slots.add(slot)
                 log.info("盘中补扫（%s）…", slot.strftime("%H:%M"))
                 log_activity("rescan", f"盘中补扫（{slot.strftime('%H:%M')}）：重探日线/事件源，为空闲策略补建仓")
-                act = rescan_pass(accounts, risks, cfg, capital, codes)
+                kline_ok, events = refresh_sources(codes)
+                act = buy_pass(accounts, risks, cfg, capital, kline_ok, events, only_idle=True)
+                _report_buy(act)
+
+        # 盘中连续买入检查（默认每 300s，simulation.intraday_buy_interval 可调/0 关闭）：
+        # 为空仓/低仓位策略用实时价挂单，接住盘中才出现的买点（如回踩进买入区间）；
+        # 与补扫共用 RESCAN_CUTOFF——14:30 后不再开新仓，卖出评估不受影响仍每轮进行。
+        if ib_interval > 0 and now.time() < RESCAN_CUTOFF:
+            if next_ib is None or now >= next_ib:
+                next_ib = now + timedelta(seconds=ib_interval)
+                act = buy_pass(accounts, risks, cfg, capital, kline_ok, events, only_idle=True)
                 _report_buy(act)
 
         # 盘中卖出评估
