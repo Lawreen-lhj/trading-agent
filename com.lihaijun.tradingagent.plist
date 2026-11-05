@@ -25,12 +25,12 @@
     <string>-i</string>
     <string>-m</string>
     <string>-s</string>
-    <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/.venv/bin/python</string>
-    <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/run_day.py</string>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>/Users/lhj/IdeaProject/trading-agent/run_day.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent</string>
+  <string>/Users/lhj/IdeaProject/trading-agent</string>
 
   <!-- 工作日 09:00 启动（Weekday: 0/7=周日, 1=周一 … 5=周五） -->
   <key>StartCalendarInterval</key>
@@ -73,8 +73,8 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/data/logs/launchd.out.log</string>
+  <string>/Users/lhj/IdeaProject/trading-agent/data/logs/launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/lihaijun/WorkBuddy/2026-10-27-21-13-55/trading-agent/data/logs/launchd.err.log</string>
+  <string>/Users/lhj/IdeaProject/trading-agent/data/logs/launchd.err.log</string>
 </dict>
 </plist>

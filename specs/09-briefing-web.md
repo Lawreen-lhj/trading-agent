@@ -45,7 +45,9 @@
 
 **行情脉搏页（#/pulse）**：治"看不到当天行情实时更新、系统像坏掉"。进入时 `ensurePulse()` 拉 `/api/pulse` + `/api/activity?limit=40`，此后 **60s 自动刷新**（force=true 绕过服务端缓存）。工具栏：采样时间 pill + 行业/概念 `.seg` 切换 + 刷新按钮。主体：涨停/炸板/跌停/最高连板/炸板率/北向净流入六张 KPI 卡；板块主力净流入 Top 表（板块/涨跌幅/主力净流入/超大单/大单/领涨股）；个股主力净流入/净流出双榜并列（净占比 |≥10%| 高亮）；北向资金日内趋势 sparkline（读 `/api/pulse` 的 trend=pulse_snapshots 当日序列，<2 点显示采样不足）；源降级 errors 如实标注；页底**系统活动流**（最近 40 条）。
 
-**仪表盘**：指数与外围条的 A 股五指改读 `/api/pulse` 的 `indices`（实时，标题带「实时 HH:MM:SS」蓝 pill；pulse 未到位时回落简报快照并标灰 pill），美股/港股/加密仍读简报；30s 轮询同时刷新 activity 与 pulse。页底附系统活动流（最近 10 条），让"系统在干什么"在首屏可见。
+**仪表盘**：指数与外围条的 A 股五指改读 `/api/pulse` 的 `indices`（实时，标题带「实时 HH:MM:SS」蓝 pill；pulse 未到位时回落简报快照并标灰 pill），美股/港股/加密仍读简报。页底附系统活动流（最近 10 条），让"系统在干什么"在首屏可见。
+
+**自动刷新调度（两级定时器）**：治"标签页开久了停在昨天/现价不跳"。**30s 快刷**：脉搏页强制 `/api/pulse`+`/api/activity?limit=40`；仪表盘强制 `/api/pulse`+`/api/quotes`+`/api/activity?limit=10` 后一次性重绘；交易计划/自选池/持仓页走 `/api/quotes` 刷实时现价（自选池刷实时涨跌幅、持仓页按实时价重算浮动盈亏/市值/距止损）；模拟页 `ensureSim(true)` 强制重估持仓市值。**60s 慢刷**：仪表盘/提醒页重读 `/api/state`，**仅当简报 `date` 或 `generated_at` 变化**（收盘任务重新生成了简报）才提交并重绘，跨夜挂着的标签页因此自动滚到当天。自动重绘经 `softRenderIf(view)` 保留滚动位置；`document.activeElement` 为 INPUT/TEXTAREA/SELECT 时跳过，避免打断正在编辑的自选池/持仓/设置；`visibilitychange` 回到前台立即补刷一次。计划表/自选池/持仓的现价（或涨跌幅）单元格取到实时报价时数值后跟蓝色小圆点 ●（悬停显示实时涨跌幅/现价），与日报快照值区分。
 
 **选股页（#/screening）**：进入时懒加载 `/api/screening`（数据量大、非每页需要，故不进 /api/state），顶部日期下拉切换历史选股日；每只候选渲染一张卡片——排名/代码/名称/标签/评分/现价/涨幅/形态 + `build_reasons()` 的**逐条入选理由**（`.reasons` 列表）+ 交易计划（ready 时绿色 note）。卡片标题行另挂两枚策略徽章与终端报告对齐：蓝色「适配策略 N：策略名 强度」（读 `strategy_hits`，四策略共振一眼可见）与琥珀色「策略直命·未过漏斗」（读 `via_strategy`，提示该票绕过三层漏斗、仓位需自行降档）。卡片右下角为**一键加入自选池**按钮（已在池则显示灰徽章「已在自选池」），工具栏另有「+ 未入池 N 只全部加入自选池」批量按钮（confirm 后提交）；写回走 `POST /api/watchlist/add`（body `{items:[{code,name,tag}]}` 或 `{codes:[...]}`），与 `run_screen.py --write` 同口径——configstore 校验 + 备份 + 原子写、已存在代码跳过、超 60 只上限报 ConfigError；成功后 `load()` 刷新 state，导航自选池计数同步。理由读自落库的 `screening_results.detail_json`，故仅 `--save` 跑过的选股有理由；旧记录显示「该次运行未记录理由」。无记录时提示运行 `run_screen.py --save`。
 
@@ -64,6 +66,7 @@
 | /api/screening | 选股结果（?date= 切换，默认最近一日）：{date, dates[], rows[]}，rows 为 detail_json 解析出的候选（含 reasons/plan/patterns/score） |
 | /api/pulse | 行情脉搏（服务端 src/pulse.collect 60s 缓存）：ts/date + 板块主力榜(行业/概念) + 个股主力净流入/流出双榜 + 北向 + 涨停炸板计数 + A股指数实时 indices + errors + trend（pulse_snapshots 当日序列，供 sparkline） |
 | /api/activity | 系统活动流（?limit=&date=）：activity_log 按时间正序 [{ts,kind,strategy,message,detail}]，kind ∈ scan/skip/buy/sell/rescan/snapshot/start/warn/info |
+| /api/quotes | 实时现价（?codes= 逗号分隔、上限 60）：`{quotes:{code:{price,pct_chg,change,name,stale}}, ts}`；服务端 5s 短缓存合并多标签页轮询，只对过期/缺失代码打腾讯 `tx.quotes`，上游限流时旧缓存兜底并置 stale=true、新代码缺省，接口永不抛错；供计划表/自选池/持仓现价实时跳动 |
 | /api/simulation/accounts | 四策略账户全景：各账户中文名/总资产/现金/持仓市值/仓位/浮动盈亏/收益率/持仓数 + market_session() 时段 + 读 data/sim_live_state.json 的自动循环心跳 |
 | /api/simulation/compare | 四策略对比一次取全：每账户概览 + 完整持仓列表 + note（心跳落盘的空仓原因/建仓笔数）+ 时段 + 心跳 |
 | /api/simulation/kline | ?code=&days=（默认160，夹到60~320）：腾讯 tx.kline 前复权日K candles[{date,open,close,high,low}] + 各策略账户成交流水打点 marks[{date,direction,price,quantity,account,cn,reason}] + name + source_error（日线源失败时非空）；供单账户视图「K线与买卖点」图 |

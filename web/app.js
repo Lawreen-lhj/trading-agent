@@ -28,6 +28,8 @@ const S = {
   pulseBoard: 'industry',
   activity: null,
   activityErr: null,
+  quotes: null,
+  quotesTs: null,
 };
 
 const TITLES = {
@@ -166,6 +168,41 @@ function ensurePulse() {
 }
 function ensureActivity() {
   loadActivity(10).then(() => { if (S.view === 'dashboard') render(); });
+}
+
+/* ---------------- 数据：实时现价（计划表/自选池/持仓） ---------------- */
+function collectQuoteCodes() {
+  const set = new Set();
+  const pad = (c) => String(c).padStart(6, '0');
+  const b = (S.data || {}).brief || {};
+  if (S.view === 'dashboard' || S.view === 'plans') {
+    (b.watch || []).forEach((r) => r.code && set.add(pad(r.code)));
+  } else if (S.view === 'watch') {
+    ((S.cfg || {}).watchlist || []).forEach((it) => it.code && set.add(pad(it.code)));
+  } else if (S.view === 'holdings') {
+    ((S.cfg || {}).holdings || []).forEach((h) => h.code && set.add(pad(h.code)));
+  }
+  return [...set];
+}
+
+async function loadQuotes() {
+  const codes = collectQuoteCodes();
+  if (!codes.length) return;
+  try {
+    const d = await api('/api/quotes?codes=' + codes.join(','));
+    S.quotes = (d && d.quotes) || {};
+    S.quotesTs = d && d.ts;
+  } catch (e) {
+    /* 现价拿不到就退回简报快照，不打断渲染 */
+  }
+}
+
+// 按代码取实时报价（无则 null）
+const lq = (code) => (S.quotes || {})[String(code).padStart(6, '0')] || null;
+// 现价：优先实时，退回快照价
+function livePrice(code, snapPrice) {
+  const q = lq(code);
+  return q && q.price != null ? q.price : snapPrice;
 }
 
 const ACT_KIND_STYLE = {
@@ -317,6 +354,7 @@ function viewDashboard() {
 
   if (!S.activity) ensureActivity();
   if (!S.pulse) loadPulse().then(() => { if (S.view === 'dashboard') render(); });
+  if (!S.quotes) loadQuotes().then(() => { if (S.view === 'dashboard') render(); });
   const liveIdx = (S.pulse && (S.pulse.indices || []).length) ? S.pulse.indices : null;
 
   return `
@@ -392,11 +430,13 @@ function viewDashboard() {
       <tbody>
       ${ready.map((r) => {
         const p = r.plan;
+        const q = lq(r.code);
+        const px = livePrice(r.code, (r.snap || {}).close);
         return `<tr>
           <td class="name"><b>${esc(r.name)}</b>${r.is_holding ? ' <span class="pill hold">持仓</span>' : ''}
             <div class="code">${esc(r.code)} · ${esc(r.tag || '')}</div></td>
           <td class="r n"><b style="color:${scoreColor(r.score)}">${r.score}</b></td>
-          <td class="r n">${num((r.snap || {}).close)}</td>
+          <td class="r n">${num(px)}${q ? ` <span class="pill blue" style="font-size:10px" title="实时 ${pct(q.pct_chg)}">●</span>` : ''}</td>
           <td class="r n"><b>${num(p.buy_lo)}–${num(p.buy_hi)}</b></td>
           <td class="r n">${num(p.stop)} <span class="muted">${p.risk_pct != null ? `-${p.risk_pct.toFixed(1)}%` : ''}</span></td>
           <td class="r n">${num(p.target1)}</td>
@@ -451,8 +491,9 @@ function viewDashboard() {
 function viewPlans() {
   const b = S.data.brief;
   if (!b) return `<div class="empty"><b>还没有简报</b>先运行一次。</div>`;
+  if (!S.quotes) loadQuotes().then(() => { if (S.view === 'plans') render(); });
   const rows = (b.watch || []).map((r) => ({
-    date: b.date, name: r.name, code: r.code, score: r.score, price: (r.snap || {}).close,
+    date: b.date, name: r.name, code: r.code, score: r.score, price: livePrice(r.code, (r.snap || {}).close),
     tag: r.tag, p: r.plan || {}, is_holding: r.is_holding,
   })).sort((x, y) => (y.p.ready ? 1 : 0) - (x.p.ready ? 1 : 0) || y.score - x.score);
 
@@ -506,7 +547,7 @@ function viewPlans() {
             <div class="code">${esc(r.code)} · ${esc(r.tag || '')}</div></td>
           <td class="r n"><b style="color:${scoreColor(r.score)}">${r.score}</b>
             <div class="bar"><i style="width:${r.score}%;background:${scoreColor(r.score)}"></i></div></td>
-          <td class="r n">${num(r.price)}</td>
+          <td class="r n">${num(r.price)}${lq(r.code) ? ` <span class="pill blue" style="font-size:10px" title="实时 ${pct((lq(r.code)||{}).pct_chg)}">●</span>` : ''}</td>
           <td class="r n">${ok ? `<b>${num(p.buy_lo)}–${num(p.buy_hi)}</b>` : '<span class="muted">—</span>'}</td>
           <td class="r n">${ok ? num(p.stop) : '<span class="muted">—</span>'}</td>
           <td class="r n ${cls(dist)}">${ok ? pct(dist, 1) : '—'}</td>
@@ -546,6 +587,7 @@ function viewWatch() {
   const list = S.cfg.watchlist || [];
   const briefMap = {};
   ((S.data.brief || {}).watch || []).forEach((r) => { briefMap[r.code] = r; });
+  if (!S.quotes) loadQuotes().then(() => { if (S.view === 'watch') render(); });
 
   return `
   <div class="banner info">短线池建议 10–20 只。代码必须是 6 位数字（沪市 6 开头、深市 0/3 开头、科创 688）。
@@ -567,6 +609,8 @@ function viewWatch() {
       ${list.map((it, i) => {
         const r = briefMap[String(it.code).padStart(6, '0')] || {};
         const snap = r.snap || {};
+        const q = lq(it.code);
+        const pc = q && q.pct_chg != null ? q.pct_chg : snap.pct_chg;
         const sig = (r.alerts || []).slice(0, 2).map((a) => `<span class="pill ${a.level}">${esc(a.rule)}</span>`).join(' ')
           || '<span class="muted">—</span>';
         return `<tr>
@@ -574,7 +618,7 @@ function viewWatch() {
           <td><input type="text" value="${esc(it.name)}" data-bind="watchlist.${i}.name" placeholder="名称"></td>
           <td><input type="text" value="${esc(it.tag || '')}" data-bind="watchlist.${i}.tag" placeholder="行业/主题"></td>
           <td class="r n">${r.score != null ? `<b style="color:${scoreColor(r.score)}">${r.score}</b>` : '<span class="muted">—</span>'}</td>
-          <td class="r n ${cls(snap.pct_chg)}">${pct(snap.pct_chg)}</td>
+          <td class="r n ${cls(pc)}">${pct(pc)}${q ? ` <span class="pill blue" style="font-size:10px" title="实时现价 ${num(q.price)}">●</span>` : ''}</td>
           <td>${sig}</td>
           <td class="c"><button class="btn sm danger" data-act="del-watch" data-idx="${i}">删</button></td>
         </tr>`;
@@ -590,6 +634,7 @@ function viewHoldings() {
   const rows = S.data.brief ? (S.data.brief.holdings || []) : [];
   const rowMap = {};
   rows.forEach((h) => { rowMap[h.code] = h; });
+  if (!S.quotes) loadQuotes().then(() => { if (S.view === 'holdings') render(); });
 
   return `
   <div class="banner info">填了持仓才能算：浮动盈亏、持有交易日数（时间止损）、距止损距离。
@@ -614,17 +659,25 @@ function viewHoldings() {
       <tbody>
       ${list.map((h, i) => {
         const r = rowMap[String(h.code).padStart(6, '0')] || {};
-        const broken = r.stop_broken;
+        const q = lq(h.code);
+        const qty = Number(h.qty), cost = Number(h.cost);
+        const canPnl = q && cost > 0;
+        const price = q && q.price != null ? q.price : r.price;
+        const pnl_pct = canPnl ? (price / cost - 1) * 100 : r.pnl_pct;
+        const pnl_amt = canPnl && qty ? (price - cost) * qty : r.pnl_amt;
+        const mktval = q && q.price != null && qty ? price * qty : r.market_value;
+        const stopDist = q && q.price != null && r.stop ? (r.stop / price - 1) * 100 : r.stop_dist_pct;
+        const broken = q && q.price != null && r.stop ? price <= r.stop : r.stop_broken;
         return `<tr>
           <td><input class="w-code" type="text" value="${esc(h.code)}" data-bind="holdings.${i}.code" maxlength="6"></td>
           <td class="r"><input type="number" value="${esc(h.qty)}" data-bind="holdings.${i}.qty" style="text-align:right"></td>
           <td class="r"><input type="number" step="0.001" value="${esc(h.cost)}" data-bind="holdings.${i}.cost" style="text-align:right"></td>
-          <td class="r n">${num(r.price)}</td>
-          <td class="r n ${cls(r.pnl_pct)}">${pct(r.pnl_pct)}<div class="code">${r.pnl_amt != null ? num(r.pnl_amt, 0) : ''}</div></td>
-          <td class="r n">${r.market_value != null ? amt(r.market_value) : '—'}</td>
+          <td class="r n">${num(price)}${q ? ` <span class="pill blue" style="font-size:10px" title="实时 ${pct(q.pct_chg)}">●</span>` : ''}</td>
+          <td class="r n ${cls(pnl_pct)}">${pct(pnl_pct)}<div class="code">${pnl_amt != null ? num(pnl_amt, 0) : ''}</div></td>
+          <td class="r n">${mktval != null ? amt(mktval) : '—'}</td>
           <td class="r n">${r.held_days != null ? r.held_days + ' 天' : '—'}</td>
           <td class="r n">${num(r.stop)}<div class="code">${esc(r.stop_basis || '')}</div></td>
-          <td class="r n ${cls(r.stop_dist_pct)}">${r.stop_dist_pct != null ? pct(r.stop_dist_pct, 1) : '—'}
+          <td class="r n ${cls(stopDist)}">${stopDist != null ? pct(stopDist, 1) : '—'}
             ${broken ? '<div class="pill P0">已破</div>' : ''}</td>
           <td><input type="date" value="${esc(h.opened || '')}" data-bind="holdings.${i}.opened"></td>
           <td class="c"><button class="btn sm danger" data-act="del-hold" data-idx="${i}">删</button></td>
@@ -1555,19 +1608,69 @@ window.addEventListener('hashchange', routeFromHash);
 $('#btn-run').addEventListener('click', runBrief);
 $('#btn-reload').addEventListener('click', async () => { await load(); toast('已重新读取'); });
 
+/* ---------------- 自动刷新调度 ----------------
+   原则：用户停在哪个页面，就把那个页面上"该实时"的数据自动刷新到位——
+   · 指数条 / 行情脉搏：30s 强制拉一次（服务端上游缓存 60s，多拉不额外打接口）
+   · 计划表 / 自选池 / 持仓的现价：30s 走 /api/quotes 实时跳动
+   · 模拟盘盈亏：30s force 刷新（服务端按实时价重估持仓市值）
+   · 简报本身（日期/温度/结论）：60s 重读 /api/state，只有收盘任务重新生成了
+     简报（date 或 generated_at 变了）才提交并重绘，避免无谓闪烁
+   自动重绘一律保留滚动位置，且用户正在输入框里编辑时不打扰。 */
+function editing() {
+  const ae = document.activeElement;
+  return !!(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName));
+}
+
+function softRenderIf(view) {
+  if (S.view !== view || editing()) return;
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+}
+
+async function refreshState() {
+  if (editing()) return;
+  try {
+    const d = await api('/api/state');
+    const oldB = ((S.data || {}).brief) || {};
+    const nb = d.brief || {};
+    const changed = !S.data || oldB.date !== nb.date || oldB.generated_at !== nb.generated_at;
+    S.data = d;
+    if (changed) {
+      S.cfg = clone(d.config);
+      if (!S.histSel && (d.history || []).length) S.histSel = d.history[0].date;
+      softRenderIf(S.view);
+    }
+  } catch (e) { /* 网络抖动，下一轮再试 */ }
+}
+
+function fastTick() {
+  const v = S.view;
+  if (v === 'pulse') {
+    Promise.all([loadPulse(true), loadActivity(40)]).then(() => softRenderIf('pulse'));
+  } else if (v === 'dashboard') {
+    Promise.all([loadPulse(true), loadQuotes(), loadActivity(10)]).then(() => softRenderIf('dashboard'));
+  } else if (v === 'plans' || v === 'watch' || v === 'holdings') {
+    loadQuotes().then(() => softRenderIf(v));
+  } else if (v === 'simulation') {
+    ensureSim(true);
+  }
+}
+
+function slowTick() {
+  if (S.view === 'dashboard' || S.view === 'alerts') refreshState();
+}
+
+// 回到前台立刻刷一次，避免后台标签长时间挂起后仍显示旧数据
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { fastTick(); slowTick(); }
+});
+
 (async () => {
   tickClock();
   setInterval(tickClock, 1000);
-  // 行情脉搏 / 活动流自动刷新：脉搏页 60s 拉一次（上游缓存也是 60s），仪表盘 30s 拉一次活动流
-  setInterval(() => {
-    if (S.view === 'pulse') {
-      loadPulse(true).then(() => { if (S.view === 'pulse') render(); });
-      loadActivity(40).then(() => { if (S.view === 'pulse') render(); });
-    } else if (S.view === 'dashboard') {
-      ensureActivity();
-      loadPulse().then(() => { if (S.view === 'dashboard') render(); });
-    }
-  }, 30000);
+  setInterval(fastTick, 30000);   // 实时指数 / 现价 / 模拟盘盈亏
+  setInterval(slowTick, 60000);   // 简报状态（收盘重生成后自动滚到当天）
   routeFromHash();
   try {
     await load();

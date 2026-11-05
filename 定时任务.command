@@ -9,7 +9,12 @@ LABEL="com.lihaijun.tradingagent"
 SRC="$(pwd)/${LABEL}.plist"
 DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
-PY="$(pwd)/.venv/bin/python"
+# 优先项目 venv；本机按约定用系统 python3（无 .venv）时回退到 PATH 上的 python3
+if [ -x "$(pwd)/.venv/bin/python" ]; then
+  PY="$(pwd)/.venv/bin/python"
+else
+  PY="$(command -v python3)"
+fi
 
 c_green=$'\033[32m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_bold=$'\033[1m'; c_off=$'\033[0m'
 
@@ -18,9 +23,8 @@ echo "${c_bold}A股交易 Agent · 全天托管${c_off}"
 echo "${c_dim}工作日 09:00 自动启动 → 15:10 收尾并跑复盘；进程崩溃会自动重启${c_off}"
 echo
 
-if [ ! -x "$PY" ]; then
-  echo "${c_red}找不到 Python 环境：$PY${c_off}"
-  echo "请先在项目目录执行：python3 -m venv .venv && .venv/bin/pip install pyyaml"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "${c_red}找不到 Python 环境：既无 $(pwd)/.venv/bin/python，PATH 上也没有 python3${c_off}"
   echo; read -r -p "按回车关闭…" _; exit 1
 fi
 if [ ! -f "$SRC" ]; then

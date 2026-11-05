@@ -16,6 +16,7 @@ import mimetypes
 import re
 import subprocess
 import threading
+import time
 import traceback
 import webbrowser
 from collections import deque
@@ -41,6 +42,12 @@ BRIEFINGS = DATA / "briefings"
 DB_PATH = DATA / "market.db"
 SIM_DB = DATA / "simulation.db"
 SIM_LIVE_STATE = DATA / "sim_live_state.json"
+
+# 实时行情短缓存：{code: {"price": float, "pct": float, "ts": float}}。
+# 多个浏览器标签会各自轮询现价，服务端先合并到一层 5s 缓存里，
+# 避免把腾讯源打爆触发反爬（tx.kline 连跑 ~30 次就会 501）。
+_QUOTE_CACHE: dict = {}
+_QUOTE_TTL = 5.0  # 秒
 
 BRIEF_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|demo)\.html$")
 
@@ -311,6 +318,10 @@ class Handler(BaseHTTPRequestHandler):
             limit = int((qs.get("limit") or ["60"])[0])
             day = (qs.get("date") or [None])[0]
             return self._activity(limit, day)
+        if path == "/api/quotes":
+            raw = (qs.get("codes") or [""])[0]
+            codes = [c.strip() for c in raw.split(",") if c.strip()]
+            return self._quotes(codes)
         if path == "/api/simulation/accounts":
             return self._sim_accounts()
         if path == "/api/simulation/compare":
@@ -590,6 +601,50 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             store.close()
         return self._json({"ok": True, "data": rows})
+
+    def _quotes(self, codes: list[str]) -> None:
+        """实时行情现价（腾讯源），供前端计划表/自选池/持仓现价自动跳动。
+
+        多标签页会各自轮询，这里用 5s 短缓存把请求合并到一层，只对过期或缺失
+        的代码打上游；上游异常时已缓存的仍返回旧值（stale=True），新代码则缺省，
+        保证接口永不抛错、前端不会因为一次限流就整块现价消失。
+        """
+        codes = [c.zfill(6) for c in dict.fromkeys(codes) if c][:60]
+        if not codes:
+            return self._json({"ok": True, "data": {"quotes": {}, "ts": time.time()}})
+
+        now = time.time()
+        fresh = [c for c in codes
+                 if c not in _QUOTE_CACHE or now - _QUOTE_CACHE[c].get("ts", 0) > _QUOTE_TTL]
+        if fresh:
+            try:
+                from src import tx
+                for q in tx.quotes([tx.tx_code(c) for c in fresh]):
+                    c = str(q.get("code", "")).zfill(6)
+                    if q.get("close"):
+                        _QUOTE_CACHE[c] = {
+                            "price": q["close"],
+                            "pct_chg": q.get("pct_chg"),
+                            "change": q.get("change"),
+                            "name": q.get("name"),
+                            "ts": now,
+                        }
+            except Exception:  # noqa: BLE001
+                pass  # 上游限流/超时：下面的组装会用旧缓存兜底
+
+        out = {}
+        for c in codes:
+            hit = _QUOTE_CACHE.get(c)
+            if not hit:
+                continue
+            out[c] = {
+                "price": hit.get("price"),
+                "pct_chg": hit.get("pct_chg"),
+                "change": hit.get("change"),
+                "name": hit.get("name"),
+                "stale": now - hit.get("ts", 0) > _QUOTE_TTL,
+            }
+        return self._json({"ok": True, "data": {"quotes": out, "ts": now}})
 
     def _sim_compare(self) -> None:
         """四策略横向对比：每个账户的概览 + 完整持仓 + 空仓原因（供对比视图一次取全）。"""
