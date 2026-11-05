@@ -51,6 +51,30 @@ watchlist:
 - code: '300033'
   name: 同花顺
   tag: 选股
+- code: '000603'
+  name: 盛达资源
+  tag: 贵金属
+- code: 002088
+  name: 鲁阳节能
+  tag: 装修建材
+- code: '600641'
+  name: 先导基电
+  tag: 半导体
+- code: '601012'
+  name: 隆基绿能
+  tag: 选股
+- code: '002241'
+  name: 歌尔股份
+  tag: 选股
+- code: '300014'
+  name: 亿纬锂能
+  tag: 选股
+- code: 002812
+  name: 恩捷股份
+  tag: 选股
+- code: '688018'
+  name: 乐鑫科技
+  tag: 选股
 holdings: []
 thresholds:
   pct_change_p1: 4.0
