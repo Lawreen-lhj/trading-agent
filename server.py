@@ -20,7 +20,7 @@ import time
 import traceback
 import webbrowser
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -497,6 +497,108 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "data": {"path": str(path)}})
 
     # ---------- 模拟交易 ----------
+    # 心跳 notes 文案 → 卡片状态归一：先匹配到先生效（顺序即优先级）。
+    # label 只放短状态、detail 只放补充信息（当前相位/受限指标/未成交原因等），
+    # 两者拼起来是一句完整人话，不重复同一件事；前端只认 status 上色。
+    _TODAY_STATUS_RULES = (
+        ("相位不适配", "phase_gate", "今日相位不适配"),
+        ("K线源限流", "source_limit", "今日K线源限流"),
+        ("无 48h 新鲜利好", "no_event", "今日无新鲜利好"),
+        ("未选出符合条件标的", "no_match", "今日无符合条件的票"),
+        ("挂单均未成交", "unfilled", "今日挂单未成交"),
+        ("挂单未成交", "unfilled", "今日挂单未成交"),
+        ("scan 异常", "error", "今日扫描异常"),
+        ("策略未注册", "error", "策略未注册"),
+        ("未取到自选池实时报价", "no_quote", "今日无实时报价"),
+        ("建仓", "acted", "今日有操作"),
+    )
+    _PHASE_RE = re.compile(r"当前「(.+?)」")
+
+    def _sim_today(self, accts: list[Account], live: dict) -> dict:
+        """四策略「今日动作」汇总，供卡片直接回答"今天到底动没动、为什么没动"。
+
+        三个来源交叉：
+          · 成交笔数/最近一笔 —— simulation.db sim_trades（trade_date == 今天）；
+          · 扫描轮数/该策略弃权轮数 —— market.db activity_log 当日聚合；
+          · 最新结论 notes —— run_sim_live 心跳 data/sim_live_state.json。
+        以成交为事实基准（有成交即 acted），没成交时再按 notes 文案归一出
+        「无符合条件的票 / 相位不适配 / 源限流 / 无新鲜利好」等原因，
+        三者都空则如实标「今日暂无记录」（模拟盘当天没跑）。
+        """
+        today = date.today().isoformat()
+        try:
+            store = Store(DB_PATH)
+            try:
+                stats = store.activity_day_stats(today)
+            finally:
+                store.close()
+        except Exception:  # noqa: BLE001
+            stats = {"scan_rounds": 0, "rescan_rounds": 0, "per_strategy": {}}
+        scan_rounds = stats.get("scan_rounds", 0)
+        notes = live.get("notes") or {}
+        out = {}
+        for acct in accts:
+            aid = acct.account_id
+            per = stats.get("per_strategy", {}).get(aid) or {}
+            buys = sells = 0
+            last = None
+            for t in acct.get_trades(200):
+                if t.get("trade_date") != today:
+                    continue
+                side = t.get("direction")
+                if side not in ("buy", "sell"):
+                    continue
+                if side == "buy":
+                    buys += 1
+                else:
+                    sells += 1
+                if last is None:  # get_trades 最新在前 → 第一条即最近一笔
+                    last = {
+                        "time": (t.get("trade_time") or "")[11:16],
+                        "side": side, "code": t.get("code"), "name": t.get("name"),
+                        "price": t.get("price"), "quantity": t.get("quantity"),
+                        "reason": t.get("reason") or "",
+                    }
+            note = notes.get(aid) or ""
+            acted = (buys + sells) > 0
+            if acted:
+                status, label = "acted", "今日有操作"
+                bits = ([f"买{buys}"] if buys else []) + ([f"卖{sells}"] if sells else [])
+                detail = "·".join(bits)
+                if last:
+                    detail += (f" 最近 {last['time']} "
+                               f"{'买' if last['side'] == 'buy' else '卖'} {last['name']}")
+            else:
+                status, label, detail = "scanned", "今日已扫描·未出手", ""
+                for key, st, lb in self._TODAY_STATUS_RULES:
+                    if key in note:
+                        status, label = st, lb
+                        break
+                if status == "phase_gate":
+                    m = self._PHASE_RE.search(note)
+                    detail = f"当前「{m.group(1)}」" if m else ""
+                elif status == "source_limit":
+                    detail = "MA/RSI 等指标无法计算"
+                elif status == "no_event":
+                    detail = "48h 内无利好事件"
+                elif status == "unfilled":
+                    detail = "价格未触达/涨停封死"
+                elif status == "no_quote":
+                    detail = "未取到自选池实时报价"
+                elif status == "error":
+                    detail = note.replace("空仓·", "")
+            if not acted and not note and not scan_rounds:
+                status, label, detail = "none", "今日暂无记录", "模拟盘当日未运行"
+            out[aid] = {
+                "date": today, "acted": acted, "buys": buys, "sells": sells,
+                "last": last, "note": note,
+                "status": status, "label": label, "detail": detail,
+                "scan_rounds": scan_rounds,
+                "skip_rounds": per.get("skip", 0),
+                "rescan_rounds": stats.get("rescan_rounds", 0),
+            }
+        return out
+
     def _get_account(self, account: str = None) -> Account:
         SIM_DB.parent.mkdir(parents=True, exist_ok=True)
         cfg = configstore.load(CONFIG)
@@ -545,11 +647,17 @@ class Handler(BaseHTTPRequestHandler):
                     a.update_market_prices(missing)
 
     def _sim_accounts(self) -> None:
-        """四策略账户总览 + 当前市场时段 + 盘中自动循环心跳。"""
+        """四策略账户总览 + 当前市场时段 + 盘中自动循环心跳 + 各策略当日动作。"""
         cfg = configstore.load(CONFIG)
         capital = cfg.get("simulation", {}).get("initial_capital", 100000)
         accts = [self._get_account(aid) for aid in SIM_STRATEGY_IDS]
         self._refresh_accounts(accts)
+        live = {}
+        try:
+            live = json.loads(SIM_LIVE_STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live = {}
+        today_act = self._sim_today(accts, live)
         accounts = []
         for acct in accts:
             s = acct.get_summary()
@@ -565,12 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                 "total_return_pct": s.get("total_return_pct"),
                 "position_count": s.get("position_count"),
                 "trade_count": s.get("trade_count"),
+                "today": today_act.get(acct.account_id, {}),
             })
-        live = {}
-        try:
-            live = json.loads(SIM_LIVE_STATE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            live = {}
         self._json({"ok": True, "data": {
             "session": market_session(),
             "accounts": accounts,
@@ -658,6 +762,7 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, json.JSONDecodeError):
             live = {}
         notes = live.get("notes") or {}
+        today_act = self._sim_today(accts, live)
         accounts = []
         for acct in accts:
             s = acct.get_summary()
@@ -676,6 +781,7 @@ class Handler(BaseHTTPRequestHandler):
                 "trade_count": s.get("trade_count"),
                 "positions": acct.get_positions(),
                 "note": notes.get(acct.account_id, ""),
+                "today": today_act.get(acct.account_id, {}),
             })
         self._json({"ok": True, "data": {
             "session": market_session(),

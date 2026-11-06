@@ -694,5 +694,35 @@ class Store:
         rows.reverse()
         return rows
 
+    def activity_day_stats(self, run_date: str) -> dict:
+        """当日活动流聚合：全局扫描/补扫轮数 + 每策略 skip/buy/sell 计数。
+
+        run_sim_live 每轮对每个策略最多落一条 skip（弃权原因）或若干 buy/sell，
+        所以某策略的 skip 计数 ≈ 它当日"扫过但没出手"的轮数；scan/rescan 不带
+        strategy（是整轮级别的），单独计全局轮数。WebUI 模拟交易页用它在策略卡片
+        上直接回答"今天这个策略到底动没动、扫了几轮"。
+        """
+        cur = self.conn.execute(
+            "SELECT kind, strategy, COUNT(*) FROM activity_log"
+            " WHERE run_date=? GROUP BY kind, strategy",
+            (run_date,),
+        )
+        stats = {"date": run_date, "scan_rounds": 0, "rescan_rounds": 0,
+                 "snapshot": 0, "per_strategy": {}}
+        for kind, strategy, n in cur.fetchall():
+            if not strategy:
+                if kind == "scan":
+                    stats["scan_rounds"] += n
+                elif kind == "rescan":
+                    stats["rescan_rounds"] += n
+                elif kind == "snapshot":
+                    stats["snapshot"] += n
+                continue
+            rec = stats["per_strategy"].setdefault(
+                strategy, {"skip": 0, "buy": 0, "sell": 0})
+            if kind in rec:
+                rec[kind] += n
+        return stats
+
     def close(self) -> None:
         self.conn.close()

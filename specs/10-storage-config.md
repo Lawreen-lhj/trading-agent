@@ -26,7 +26,7 @@
 | save_review / review_by_date / reviews_recent | reviews | 四维复盘 upsert/检索 |
 | save_monitor_alerts / monitor_alerts_recent / monitor_alert_stats | monitor_alerts | 盘中告警增量写入(INSERT OR IGNORE)/检索/统计 |
 | save_pulse_snapshot(run_date,ts,snap) / pulse_snapshots_today(run_date,limit) | pulse_snapshots | 行情脉搏每次采集落一行日内快照/当日按时间正序取（供北向趋势 sparkline） |
-| log_activity(run_date,ts,kind,message,strategy,detail) / activity_recent(run_date,limit) | activity_log | 系统活动流写入/检索（正序返回，前端倒序展示） |
+| log_activity(run_date,ts,kind,message,strategy,detail) / activity_recent(run_date,limit) / activity_day_stats(run_date) | activity_log | 系统活动流写入/检索（正序返回，前端倒序展示）/ 当日聚合（GROUP BY kind,strategy → 全局 scan/rescan/snapshot 轮数 + 每策略 skip/buy/sell 计数，供模拟交易页「今日动作」状态） |
 
 ### market.db 全部表（11 张业务表）
 

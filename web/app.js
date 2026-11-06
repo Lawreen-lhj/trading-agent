@@ -859,6 +859,210 @@ const SIM_SESSION_STYLE = {
   pre_open: 'gray', lunch: 'gray', closed: 'gray', non_trading_day: 'gray',
 };
 
+/* 四策略操作原则/指标/阈值说明（用于卡片悬停浮层）。
+   数据全部来自 src/strategies/*.py 的类常量与 base.py 的相位权重表，
+   改代码里的阈值时同步更新这里，保持"UI 上看到的规则 = 代码里跑的规则"。 */
+const STRATEGY_INFO = {
+  board_hit: {
+    cn: '打板/半路', en: 'board_hit',
+    tagline: '情绪回暖/高潮期进攻型：涨停封板追溢价，或涨停前半路介入',
+    phases: { '冰点': 0, '退潮': 0, '中性': 0.3, '回暖': 0.4, '高潮': 0.5 },
+    entry: [
+      '涨停封板（pct_chg ≥ limit×0.98）或半路（limit×0.7~0.98，约 7~9.8%）',
+      '流通市值 50~300 亿；排除一字板（open=high=low=close）',
+      '连板高度 ≤3；封单额/流通市值 ≥0.3%',
+      '市场门槛：涨停家数 ≥40、昨涨停今日表现 >-1%、非冰点/退潮',
+      '强度加分：板块涨停 ≥3/≥5 家、量比 1.5~3.0、封单/流通 >0.5%/1%',
+      '盈亏比 ≥1.5',
+    ],
+    exit: [
+      '止损：打板 buy×0.97（次日低开>3% 或跌破涨停价）、半路 buy×0.95',
+      '止盈：target1 +5%、target2 +10%（次日溢价）',
+      '炸板守卫：盘中 pct_chg < limit×0.95 判定信号失效',
+      '时间止损：最多持仓 3 天',
+    ],
+    abstain: [
+      '冰点/退潮相位直接空仓（策略主动弃权，不是 bug）',
+      '单票仓位 ≤ 总资金 30%，打板 risk_pct×0.8 再降 20%',
+      '每轮最多输出 10 个信号',
+    ],
+  },
+  trend_pullback: {
+    cn: '趋势波段', en: 'trend_pullback',
+    tagline: '情绪中性/回暖期稳健打法：多头排列缩量回踩均线买入',
+    phases: { '冰点': 0, '退潮': 0.4, '中性': 0.5, '回暖': 0.35, '高潮': 0.2 },
+    entry: [
+      'MA5 > MA10 > MA20 多头排列，且 MA10 三日斜率 ≥0',
+      '近 20 日涨幅 ret20 在 8%~35%（MIN_RET20 / MAX_RET20）',
+      '收盘贴 MA5 或 MA10（偏离 <3%），bias5 ≤5%（不追高）',
+      '缩量：量比 ≤0.85；日内收盘位置 close_pos ≥0.4；收盘在 MA20 之上',
+      'RSI6 ≥30（<30 弃权等企稳），30~45 视为超卖回升加分',
+      '盈亏比 ≥2.0',
+    ],
+    exit: [
+      '跌破 MA20 → 立即卖；放量（量比>1.5）跌破 MA10 → 立即卖',
+      '止损：亏损 >5%（close < cost×0.95）',
+      '止盈：bias5 >10% 或 close ≥ high20×0.98（前高阻力）',
+      '放量滞涨（量比 >2.0 且 |pct_chg| <1.5%）离场',
+      '时间止损：持仓 ≥10 天',
+    ],
+    abstain: [
+      '冰点相位不做趋势（策略主动弃权）',
+      '买入区间校验：> buy_hi×1.03 不追、< buy_lo×0.97 判定失效',
+      '每轮最多输出 15 个信号',
+    ],
+  },
+  oversold_bounce: {
+    cn: '超跌反弹', en: 'oversold_bounce',
+    tagline: '情绪冰点/退潮期防守反击：前期强势股恐慌杀跌后抢反弹，快进快出',
+    phases: { '冰点': 1.0, '退潮': 0.6, '中性': 0, '回暖': 0, '高潮': 0 },
+    entry: [
+      'RSI6 ≤25（MAX_RSI6）；60 日回撤 drawdown60 深于 -15%',
+      '止跌信号：close_pos ≥0.55；bias5 ≤ -5%',
+      '长期结构未破：close ≥ MA60×0.95',
+      '前期强势：20 日内有涨停，或 ret20 ≥ -10%',
+      '排除放量暴跌（量比 >2.0 且 pct_chg <-3%，不接飞刀）',
+      '盈亏比 ≥1.8',
+    ],
+    exit: [
+      '止盈：反弹至 MA5×0.98 或 MA10×0.98；或盈利 >5%（不贪）',
+      '止损：亏损 >4%（close < cost×0.96）或创 60 日新低 → 立即卖',
+      'RSI6 回升 >50（修复完成）离场',
+      '时间止损：最多持仓 5 天',
+    ],
+    abstain: [
+      '仅冰点/退潮相位启用，其他相位直接空仓（策略主动弃权）',
+      '冰点期信号强度 ×0.8，risk_pct ×0.7（仓位再降 30%）',
+      '跌停 >80 家且涨停 <15 家时视为极度恐慌，每轮最多 8 个信号',
+    ],
+  },
+  event_driven: {
+    cn: '事件驱动', en: 'event_driven',
+    tagline: '任何情绪阶段可用：捕捉"事件发生 → 市场充分定价"之间的个股机会',
+    phases: { '冰点': -0.1, '退潮': 0, '中性': 0.2, '回暖': 0.25, '高潮': 0.3 },
+    entry: [
+      '事件新鲜度 ≤48h（EVENT_FRESHNESS_HOURS）且 is_positive=True',
+      '事件类型十类白名单：并购重组 0.95 / 业绩超预期 0.9 / 政策利好 0.85 / 大股东增持 0.75 / 股权激励·重大合同 0.7 / 新产品 0.65 / 机构调研·评级上调 0.6 / 回购 0.55（各带建议持仓 3~7 天）',
+      '未被定价：max(ret3, ret5) ≤10%（MAX_PRICE_RUNUP）',
+      '流动性：日均成交额 ≥1 亿（MIN_AMOUNT）',
+      '技术面：close ≥ MA20×0.9；盈亏比 ≥2.0',
+      '加分：MA5>MA10 且价在 MA5 上、量比 1.2~2.5 温和放量、回暖/高潮相位 +0.10',
+    ],
+    exit: [
+      '盈利 >15% → 事件已充分定价，止盈',
+      '见光死：事件后 ≤2 天内单日跌 >3% → 立即卖',
+      '止损：亏损 >5%（cost×0.95）',
+      '时间止损：按事件类型 hold_days（3~7 天，默认 7）',
+    ],
+    abstain: [
+      '无 48h 内利好事件则空仓（事件池最多保留 100 条）',
+      '减持类公告直接排除',
+      '冰点相位信号强度 -0.10',
+    ],
+  },
+};
+
+/* 策略悬浮说明浮层：鼠标停在 [data-strategy] 元素上 180ms 后弹出；
+   浮层自身可 hover（用户可选中/复制里面的文字），移出元素与浮层后才隐藏。
+   定位优先元素下方，若下方空间不够则翻到上方；水平方向自动避让右边界。 */
+const STIP = { el: null, timer: null, hideTimer: null, current: null };
+
+function stipHtml(key) {
+  const s = STRATEGY_INFO[key];
+  if (!s) return '';
+  const ph = Object.entries(s.phases).map(([k, w]) => {
+    const on = w > 0;
+    const neg = w < 0;
+    const ww = Math.min(1, Math.abs(w)) * 100;
+    return `<span class="stip-ph${on ? ' on' : ''}${neg ? ' neg' : ''}" title="权重 ${w}">
+      <i style="width:${ww.toFixed(0)}%"></i><b>${esc(k)}</b> ${w > 0 ? w.toFixed(2) : (neg ? w.toFixed(2) : '0')}
+    </span>`;
+  }).join('');
+  const ul = (arr) => `<ul class="stip-ul">${arr.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
+  return `
+    <div class="stip-h"><b>${esc(s.cn)}</b><span class="stip-en">${esc(s.en)}</span></div>
+    <div class="stip-tag">${esc(s.tagline)}</div>
+    <div class="stip-sec"><div class="stip-k">情绪相位权重</div><div class="stip-phs">${ph}</div></div>
+    <div class="stip-sec"><div class="stip-k">入场条件</div>${ul(s.entry)}</div>
+    <div class="stip-sec"><div class="stip-k">出场条件</div>${ul(s.exit)}</div>
+    <div class="stip-sec"><div class="stip-k">主动弃权 / 风控</div>${ul(s.abstain)}</div>
+    <div class="stip-f">数据源：src/strategies/${esc(s.en)}.py · 悬停浮层内可选中复制</div>`;
+}
+
+function stipPlace(rect) {
+  const el = STIP.el;
+  const pad = 8;
+  const tw = el.offsetWidth, th = el.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let left = rect.left + rect.width / 2 - tw / 2;
+  left = Math.max(pad, Math.min(left, vw - tw - pad));
+  let top = rect.bottom + 8;
+  if (top + th > vh - pad) {
+    const above = rect.top - th - 8;
+    top = above >= pad ? above : Math.max(pad, vh - th - pad);
+  }
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+}
+
+function stipShow(key, rect) {
+  clearTimeout(STIP.hideTimer);
+  if (!STIP.el) {
+    STIP.el = document.createElement('div');
+    STIP.el.className = 'strat-tip';
+    STIP.el.addEventListener('mouseenter', () => clearTimeout(STIP.hideTimer));
+    STIP.el.addEventListener('mouseleave', () => stipScheduleHide());
+    document.body.appendChild(STIP.el);
+  }
+  if (STIP.current === key && STIP.el.classList.contains('on')) return;
+  STIP.current = key;
+  STIP.el.innerHTML = stipHtml(key);
+  STIP.el.classList.add('on');
+  // 先显示再量尺寸，才能正确定位
+  requestAnimationFrame(() => stipPlace(rect));
+}
+
+function stipScheduleHide() {
+  clearTimeout(STIP.hideTimer);
+  STIP.hideTimer = setTimeout(() => {
+    if (STIP.el) STIP.el.classList.remove('on');
+    STIP.current = null;
+  }, 160);
+}
+
+function stipScheduleShow(key, rect) {
+  clearTimeout(STIP.timer);
+  STIP.timer = setTimeout(() => stipShow(key, rect), 180);
+}
+
+/* 全局事件委托：mouseover/mouseout 冒泡到 document，用 closest([data-strategy]) 命中触发元素。
+   滚动/切换视图时立即隐藏，避免浮层飘在旧位置。 */
+document.addEventListener('mouseover', (e) => {
+  const t = e.target && e.target.closest && e.target.closest('[data-strategy]');
+  if (!t) return;
+  const key = t.getAttribute('data-strategy');
+  if (!STRATEGY_INFO[key]) return;
+  if (STIP.current === key && STIP.el && STIP.el.classList.contains('on')) {
+    clearTimeout(STIP.hideTimer);
+    return;
+  }
+  stipScheduleShow(key, t.getBoundingClientRect());
+});
+document.addEventListener('mouseout', (e) => {
+  const t = e.target && e.target.closest && e.target.closest('[data-strategy]');
+  if (!t) return;
+  // 移到浮层自身或同一触发元素的子节点时不隐藏
+  const to = e.relatedTarget;
+  if (to && (to === STIP.el || (STIP.el && STIP.el.contains(to)) || t.contains(to))) return;
+  clearTimeout(STIP.timer);
+  stipScheduleHide();
+});
+window.addEventListener('scroll', () => {
+  clearTimeout(STIP.timer);
+  if (STIP.el) STIP.el.classList.remove('on');
+  STIP.current = null;
+}, true);
+
 function ensureSim(force = false) {
   if (S.simLoading) return;
   const cmpMode = S.simMode === 'compare';
@@ -889,6 +1093,54 @@ function loadSimCompare() {
   return api('/api/simulation/compare').then((cmp) => { S.simCompare = cmp; });
 }
 
+// 「今日动作」状态：卡片/标签上直接回答"这个策略今天到底动没动、为什么没动"。
+// status/label/detail 由 server.py `_sim_today()` 归一：以当日成交为事实基准，
+// 没成交时用心跳 notes 的弃权原因兜底（无符合条件标的/相位不适配/源限流/无新鲜利好）。
+// 颜色刻意不用红绿——红绿在本项目是涨跌语义，动作状态用蓝/灰/琥珀区分。
+const SIM_TODAY_PILL = {
+  acted: 'blue',
+  no_match: 'gray', phase_gate: 'gray', no_event: 'gray', scanned: 'gray', none: 'gray',
+  unfilled: 'P1', source_limit: 'P1', no_quote: 'P1',
+  error: 'bad',
+};
+
+function simTodayTitle(t) {
+  if (!t || !t.label) return '';
+  const bits = [t.label];
+  if (t.detail) bits.push(t.detail);
+  if (t.scan_rounds) bits.push(`今日扫描 ${t.scan_rounds} 轮`);
+  if (t.skip_rounds) bits.push(`弃权 ${t.skip_rounds} 轮`);
+  if (t.last && t.last.reason) bits.push(`最近一笔：${t.last.reason}`);
+  return bits.join(' · ');
+}
+
+function simTodayPill(t, withDetail) {
+  if (!t || !t.label) return '';
+  const cls = SIM_TODAY_PILL[t.status] || 'gray';
+  const txt = withDetail && t.detail ? `${t.label} · ${t.detail}` : t.label;
+  return `<span class="pill ${cls} simtoday" title="${esc(simTodayTitle(t))}">${esc(txt)}</span>`;
+}
+
+// 单账户模式：选中策略的整行今日动作说明（比标签上的 pill 更完整）
+function simTodayBar(a) {
+  const t = a && a.today;
+  if (!t || !t.label) return '';
+  const bits = [];
+  if (t.scan_rounds) bits.push(`今日扫描 ${t.scan_rounds} 轮`);
+  if (t.skip_rounds) bits.push(`弃权 ${t.skip_rounds} 轮`);
+  if (t.buys || t.sells) bits.push(`成交 买${t.buys || 0}/卖${t.sells || 0}`);
+  if (t.last) {
+    bits.push(`最近 ${esc(t.last.time || '')} ${t.last.side === 'buy' ? '买' : '卖'} `
+      + `${esc(t.last.name || t.last.code || '')} ${t.last.quantity || 0}股 @ ${num(t.last.price)}`);
+  }
+  if (t.detail && !(t.buys || t.sells)) bits.push(esc(t.detail));
+  return `
+  <div class="simtoday-bar">
+    ${simTodayPill(t, false)}
+    <span class="simtoday-x">${bits.join(' · ')}</span>
+  </div>`;
+}
+
 function viewSimulation() {
   const cmpMode = S.simMode === 'compare';
   const ready = cmpMode ? !!S.simCompare
@@ -916,10 +1168,14 @@ function viewSimulation() {
   const tabs = (ov.accounts || []).map((a) => {
     const on = a.account_id === aid;
     const rp = a.total_return_pct || 0;
-    return `<button class="simtab${on ? ' on' : ''}" data-act="sim-account" data-v="${esc(a.account_id)}">
-      <span class="simtab-cn">${esc(a.cn)}</span>
+    const info = STRATEGY_INFO[a.account_id];
+    const tip = info ? ` title="${esc(info.cn)}：悬停查看策略说明"` : '';
+    const hint = info ? `<span class="stip-hint" aria-hidden="true">ⓘ</span>` : '';
+    return `<button class="simtab${on ? ' on' : ''}" data-act="sim-account" data-v="${esc(a.account_id)}"${info ? ` data-strategy="${esc(a.account_id)}"` : ''}${tip}>
+      <span class="simtab-cn">${esc(a.cn)}${hint}</span>
       <span class="simtab-r ${cls(rp)}">${pct(rp)}</span>
       <span class="simtab-a">${num(a.total_assets, 0)}</span>
+      <span class="simtab-t">${simTodayPill(a.today, false)}</span>
     </button>`;
   }).join('');
 
@@ -943,9 +1199,11 @@ function viewSimulation() {
   if (cmpMode) return toolbar + simCompareBody(S.simCompare);
 
   const klineSec = simKlineSection(positions, trades);
+  const curAcct = (ov.accounts || []).find((x) => x.account_id === aid) || {};
 
   return toolbar + `
   <div class="simtabs">${tabs}</div>
+  ${simTodayBar(curAcct)}
 
   <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:14px">
     ${simKpi('总资产', num(s.total_assets), '')}
@@ -1037,13 +1295,14 @@ function simCompareBody(cmp) {
   const table = `
   <div class="card tight"><div class="tw"><table>
     <thead><tr>
-      <th>策略</th><th class="r">总资产</th><th class="r">可用现金</th><th class="r">持仓市值</th>
+      <th>策略</th><th>今日动作</th><th class="r">总资产</th><th class="r">可用现金</th><th class="r">持仓市值</th>
       <th class="r">仓位</th><th class="r">浮动盈亏</th><th class="r">累计收益</th>
       <th class="r">持仓数</th><th class="r">成交数</th>
     </tr></thead>
     <tbody>
     ${accts.map((a) => `<tr>
       <td class="name"><b>${esc(a.cn)}</b><div class="code">${esc(a.account_id)}</div></td>
+      <td>${simTodayPill(a.today, false)}</td>
       <td class="r n">${num(a.total_assets)}</td>
       <td class="r n">${num(a.cash)}</td>
       <td class="r n">${num(a.position_value)}</td>
@@ -1073,12 +1332,16 @@ function simCompareBody(cmp) {
         </tbody>
       </table>`
       : `<div class="simcmp-empty">${esc(a.note || '空仓（本轮未建仓）')}</div>`;
+    const info = STRATEGY_INFO[a.account_id];
+    const tip = info ? ` title="${esc(info.cn)}：悬停查看策略说明"` : '';
+    const hint = info ? `<span class="stip-hint" aria-hidden="true">ⓘ</span>` : '';
     return `
-    <div class="card simcmp-card">
+    <div class="card simcmp-card"${info ? ` data-strategy="${esc(a.account_id)}"` : ''}${tip}>
       <div class="simcmp-h">
-        <b>${esc(a.cn)}</b>
+        <b>${esc(a.cn)}${hint}</b>
         <span class="simtab-r ${cls(rp)}">${pct(rp)}</span>
       </div>
+      <div class="simcmp-today">${simTodayPill(a.today, true)}</div>
       <div class="simcmp-kv"><span>总资产</span><b>${num(a.total_assets)}</b></div>
       <div class="simcmp-kv"><span>仓位</span><b>${((a.position_ratio || 0) * 100).toFixed(1)}%</b></div>
       <div class="simcmp-kv"><span>浮动盈亏</span><b class="${cls(a.unrealized_pnl)}">${num(a.unrealized_pnl)}</b></div>
